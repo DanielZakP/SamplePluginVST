@@ -267,6 +267,15 @@ int lyricsSnapTest (const juce::File& fixtures)
     snapWordsToOnsets (early, speechOnsets (phrases, phrasesRate));
     expect (std::abs (early[1].start - 4.79) < 0.06, "a word guessed into the pause moves to the phrase start (got " + juce::String (early[1].start, 2) + ")");
 
+    // ...while the next word keeps a guess that is now before it. Seen on Windows as "test chop We".
+    std::vector<LyricWord> crossing { { "test", 3.40, 3.9, 1.0f }, { "We", 4.00, 4.3, 1.0f }, { "chop", 4.56, 4.9, 1.0f }, { "samples", 5.00, 5.3, 1.0f } };
+    snapWordsToOnsets (crossing, speechOnsets (phrases, phrasesRate));
+    bool crossingOrdered = true;
+    for (size_t i = 1; i < crossing.size(); ++i)
+        crossingOrdered = crossingOrdered && crossing[i].start > crossing[i - 1].start;
+    expect (crossingOrdered && crossing[1].text == "We" && crossing[2].text == "chop",
+            "words keep their order (We " + juce::String (crossing[1].start, 2) + ", chop " + juce::String (crossing[2].start, 2) + ")");
+
     // Nothing to snap to: estimates are left alone
     std::vector<LyricWord> untouched { { "a", 1.0, 1.2, 1.0f }, { "b", 2.0, 2.2, 1.0f } };
     snapWordsToOnsets (untouched, { { 5.0, 0.0 }, { 6.0, 0.0 } });

@@ -378,11 +378,10 @@ LyricsResult transcribeLyrics (const juce::AudioBuffer<float>& audio, double sam
     whisper_free (ctx);
 
     // Whisper's times wander by up to ~0.3 s; pull each word onto the nearby moment it actually starts.
-    std::stable_sort (result.words.begin(), result.words.end(), [] (const LyricWord& a, const LyricWord& b) { return a.start < b.start; });
+    // The words stay in whisper's text order, which is always right; only their times move.
     snapWordsToOnsets (result.words, speechOnsets (audio, sampleRate));
 
-    // Tidy timings: in order, no overlaps, every word at least 60 ms long.
-    std::stable_sort (result.words.begin(), result.words.end(), [] (const LyricWord& a, const LyricWord& b) { return a.start < b.start; });
+    // Tidy timings: no overlaps, every word at least 60 ms long.
     const double length = (double) audio.getNumSamples() / sampleRate;
     for (size_t i = 0; i < result.words.size(); ++i)
     {
@@ -563,6 +562,24 @@ void snapWordsToOnsets (std::vector<LyricWord>& words, const std::vector<SpeechO
             j = bestJ;
         }
         --i;
+    }
+
+    // A word that kept its own estimate can end up before a neighbour that moved forward (e.g. out of
+    // a pause). Words never swap: push it to the next onset after the previous word, or just after it.
+    for (size_t w = 1; w < W; ++w)
+    {
+        auto& word = words[w];
+        const double prev = words[w - 1].start;
+        if (word.start > prev + 0.02)
+            continue;
+        double next = prev + 0.05;
+        for (const auto& o : onsets)
+            if (o.time > prev + 0.02 && o.time < prev + 1.0)
+            {
+                next = o.time;
+                break;
+            }
+        word.start = next;
     }
 }
 
