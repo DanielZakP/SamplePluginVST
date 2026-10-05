@@ -412,9 +412,9 @@ juce::String wordsBetween (const std::vector<LyricWord>& words, double startSeco
 namespace choplab
 {
 
-std::vector<double> speechOnsets (const juce::AudioBuffer<float>& audio, double sampleRate)
+std::vector<SpeechOnset> speechOnsets (const juce::AudioBuffer<float>& audio, double sampleRate)
 {
-    std::vector<double> onsets;
+    std::vector<SpeechOnset> onsets;
     const int n = audio.getNumSamples();
     if (n == 0 || sampleRate <= 0.0)
         return onsets;
@@ -470,14 +470,17 @@ std::vector<double> speechOnsets (const juce::AudioBuffer<float>& audio, double 
         const double t = (double) at * hop / sampleRate + (double) win / sampleRate * 0.5;
         if (t - lastOnset > 0.08)
         {
-            onsets.push_back (t);
+            int quietFrames = 0;
+            for (auto j = (std::ptrdiff_t) at - 1; j >= 0 && db[(size_t) j] < peak - 30.0f; --j)
+                ++quietFrames;
+            onsets.push_back ({ t, quietFrames * (double) hop / sampleRate });
             lastOnset = t;
         }
     }
     return onsets;
 }
 
-void snapWordsToOnsets (std::vector<LyricWord>& words, const std::vector<double>& onsets, double maxShift)
+void snapWordsToOnsets (std::vector<LyricWord>& words, const std::vector<SpeechOnset>& onsets, double maxShift)
 {
     const size_t W = words.size(), O = onsets.size();
     if (W == 0 || O == 0)
@@ -508,7 +511,12 @@ void snapWordsToOnsets (std::vector<LyricWord>& words, const std::vector<double>
             // or take onset j-1, if it's after whatever the previous words used
             if (j > 0)
             {
-                const double d = std::abs (onsets[j - 1] - est);
+                const auto& onset = onsets[j - 1];
+                double d = std::abs (onset.time - est);
+                // An estimate sitting in the silence before a phrase belongs to the phrase's start.
+                const bool inSilenceBefore = onset.quietBefore >= 0.15 && est < onset.time && onset.time - est <= onset.quietBefore + 0.05;
+                if (inSilenceBefore)
+                    d = juce::jmin (d, 0.02);
                 if (d <= maxShift)
                 {
                     const double prev = prefixMin[j];
@@ -542,7 +550,7 @@ void snapWordsToOnsets (std::vector<LyricWord>& words, const std::vector<double>
         }
         if (c >= 0)
         {
-            words[i - 1].start = onsets[(size_t) c];
+            words[i - 1].start = onsets[(size_t) c].time;
             // the previous word must use an onset before this one
             size_t bestJ = 0;
             double bestCost = inf;

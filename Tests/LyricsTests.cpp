@@ -217,8 +217,8 @@ int lyricsSnapTest (const juce::File& fixtures)
     }
     const auto onsets = speechOnsets (audio, rate);
     std::cout << "  speech onsets:";
-    for (auto t : onsets)
-        std::cout << " " << juce::String (t, 2);
+    for (auto o : onsets)
+        std::cout << " " << juce::String (o.time, 2);
     std::cout << "\n";
 
     const std::vector<std::pair<const char*, double>> raw { { "Hello", 0.51 }, { "world,", 0.80 }, { "this", 1.92 }, { "is", 2.56 },
@@ -257,9 +257,19 @@ int lyricsSnapTest (const juce::File& fixtures)
         ordered = ordered && words[i].start > words[i - 1].start;
     expect (ordered, "words stay in order");
 
+    // Whisper sometimes starts a phrase's first word in the pause before it (seen on Windows:
+    // "We" at 4.00 s while the phrase starts at 4.79 s in speech_en.wav).
+    juce::AudioBuffer<float> phrases;
+    double phrasesRate = 0;
+    readWav (fixtures.getChildFile ("speech_en.wav"), phrases, phrasesRate);
+    std::vector<LyricWord> early { { "test", 3.40, 3.9, 1.0f }, { "We", 4.00, 4.3, 1.0f }, { "chop", 4.79, 5.0, 1.0f } };
+    early[2].start = 5.32;
+    snapWordsToOnsets (early, speechOnsets (phrases, phrasesRate));
+    expect (std::abs (early[1].start - 4.79) < 0.06, "a word guessed into the pause moves to the phrase start (got " + juce::String (early[1].start, 2) + ")");
+
     // Nothing to snap to: estimates are left alone
     std::vector<LyricWord> untouched { { "a", 1.0, 1.2, 1.0f }, { "b", 2.0, 2.2, 1.0f } };
-    snapWordsToOnsets (untouched, { 5.0, 6.0 });
+    snapWordsToOnsets (untouched, { { 5.0, 0.0 }, { 6.0, 0.0 } });
     expect (std::abs (untouched[0].start - 1.0) < 1.0e-9 && std::abs (untouched[1].start - 2.0) < 1.0e-9, "far-away onsets are ignored");
     return lyricFailures;
 }

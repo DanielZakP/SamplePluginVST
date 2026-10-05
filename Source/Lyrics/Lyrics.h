@@ -67,12 +67,18 @@ LyricsResult transcribeLyrics (const juce::AudioBuffer<float>& audio, double sam
                                const juce::String& languageCode, const LyricsProgress&,
                                LyricsTiming timing = kDefaultLyricsTiming);
 
-// Where words could start: sharp rises in the speech band (seconds).
-std::vector<double> speechOnsets (const juce::AudioBuffer<float>& audio, double sampleRate);
+// Where words could start: sharp rises in the speech band.
+struct SpeechOnset
+{
+    double time = 0.0;        // seconds
+    double quietBefore = 0.0; // how long it was silent just before, in seconds
+};
+std::vector<SpeechOnset> speechOnsets (const juce::AudioBuffer<float>& audio, double sampleRate);
 
 // Moves word starts onto nearby speech onsets (within maxShift seconds), keeping the words in
 // order. Uses a global best match so one bad guess can't drag its neighbours onto the wrong onset.
-void snapWordsToOnsets (std::vector<LyricWord>& words, const std::vector<double>& onsets, double maxShift = 0.32);
+// A word whose estimate lands in the silence before a phrase moves to where the phrase starts.
+void snapWordsToOnsets (std::vector<LyricWord>& words, const std::vector<SpeechOnset>& onsets, double maxShift = 0.32);
 
 // Words whose middle falls inside [startSeconds, endSeconds), joined with spaces.
 juce::String wordsBetween (const std::vector<LyricWord>&, double startSeconds, double endSeconds);
