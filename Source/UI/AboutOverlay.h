@@ -57,7 +57,8 @@ public:
             "of the License, or (at your option) any later version.\n\n"
             "It is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the "
             "implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the license for details.\n\n"
-            "Built with JUCE, whisper.cpp and OpenAI's Whisper models, Signalsmith Stretch, the Steinberg VST3 SDK, "
+            "Built with JUCE, whisper.cpp and OpenAI's Whisper models, demucs.cpp and Meta's Demucs models, Eigen, "
+            "Signalsmith Stretch, the Steinberg VST3 SDK, "
             "FLAC, Ogg Vorbis, zlib, libpng, the Independent JPEG Group's libjpeg, HarfBuzz and SheenBidi. Their "
             "licenses and copyright notices are in THIRD_PARTY_NOTICES.md next to the plugin and in the source code.";
         g.drawFittedText (body, bodyArea, juce::Justification::topLeft, 20, 1.0f);
@@ -70,7 +71,7 @@ public:
 
     void resized() override
     {
-        panel = getLocalBounds().withSizeKeepingCentre (juce::jmin (620, getWidth() - 40), juce::jmin (390, getHeight() - 40));
+        panel = getLocalBounds().withSizeKeepingCentre (juce::jmin (620, getWidth() - 40), juce::jmin (410, getHeight() - 40));
         auto r = panel.reduced (24, 20);
         close.setBounds (r.getRight() - 70, r.getY(), 70, 28);
         r.removeFromTop (46);

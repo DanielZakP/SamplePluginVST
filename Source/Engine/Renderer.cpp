@@ -22,9 +22,7 @@ Processing combine (const GlobalSettings& g, const SliceSettings* s, double host
     return p;
 }
 
-namespace
-{
-juce::AudioBuffer<float> resample (const juce::AudioBuffer<float>& in, double ratio)
+juce::AudioBuffer<float> resampleAudio (const juce::AudioBuffer<float>& in, double ratio)
 {
     // ratio = input samples consumed per output sample
     const int numOut = juce::jmax (1, (int) std::floor (in.getNumSamples() / ratio));
@@ -52,6 +50,8 @@ juce::AudioBuffer<float> resample (const juce::AudioBuffer<float>& in, double ra
     return out;
 }
 
+namespace
+{
 juce::AudioBuffer<float> stretch (const juce::AudioBuffer<float>& in, double rate, double speed, double transpose)
 {
     const int channels = in.getNumChannels();
@@ -114,12 +114,12 @@ juce::AudioBuffer<float> renderSegment (const SampleData& sample, juce::int64 st
     if (p.isIdentity() || p.tapeOnly)
     {
         const double ratio = rateRatio * p.speed; // tape-style: speed and pitch move together
-        out = std::abs (ratio - 1.0) < 1.0e-9 ? seg : resample (seg, ratio);
+        out = std::abs (ratio - 1.0) < 1.0e-9 ? seg : resampleAudio (seg, ratio);
     }
     else
     {
         if (std::abs (rateRatio - 1.0) > 1.0e-9)
-            seg = resample (seg, rateRatio);
+            seg = resampleAudio (seg, rateRatio);
         out = stretch (seg, targetRate, p.speed, p.transpose);
     }
 

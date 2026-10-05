@@ -14,6 +14,7 @@ A VST3 sample chopper for FL Studio (Windows). Drop a sample in and it:
 - tells you **what each chop is**: a rough type (kick, snare/clap, hi-hat, bass, tonal, mixed) and the chord or note in it
 - lets you **label** every chop
 - finds the **lyrics** and puts each word on the chop it's sung in (speech-to-text that runs offline on your PC, language detected automatically)
+- splits it into **stems** (vocals, drums, bass, other, instrumental) on your PC, and lets the chops play any one of them, so the same chops give you the acapella, the drums or the beat without the vocal
 - has a **piano roll** where every row is a chop, labelled with its note, label and lyrics, so you build the pattern seeing what each key is, then drag it into FL
 - **pitch, speed and reverse** per chop and for the whole sample, with speed either time-stretched (keeps pitch) or tape-style
 - **syncs** the sample to your FL project tempo
@@ -43,6 +44,7 @@ A VST3 sample chopper for FL Studio (Windows). Drop a sample in and it:
 - **Drag into FL**: drag a chop out of the waveform or use *Drag WAV*; *Drag sample* gives the whole processed sample; *Drag MIDI pattern* gives a pattern that replays the chops in their original order. Files are saved in `Documents\ChopLab\<sample name>\`, and their names include any edits so an earlier drag never gets overwritten.
 - **Note length**: *Gate* stops a chop when the note ends, *One-shot* always plays it through. *Mono* makes each chop cut off the previous one.
 - **Lyrics**: click *Find lyrics* in the Lyrics card. The first time, it downloads the speech model once (Fast is about 60 MB, Accurate about 190 MB, saved in `%APPDATA%\ChopLab\Models`). Words show in the Lyrics column, on each chop, and under the waveform. The language is detected automatically; pick one from the list if it guesses wrong, then click *Find again*. Double-click a chop's lyrics to fix them; your edits are kept (shown brighter than detected words).
+- **Stems**: click *Separate stems* in the Stems card. The first time, it downloads the separation model once (about 85 MB, next to the lyrics models). Then pick what the chops play: *Full mix*, *Vocals*, *Drums*, *Bass*, *Other* or *Instrumental* (everything but the vocal). The chops, tempo, labels, lyrics and piano roll stay exactly as they are; only the audio behind them changes. Re-chopping by transients while a stem is picked uses that stem's hits, which is a clean way to chop drums out of a full song. *Drag* gives you the picked stem, or all four main stems at once when *Full mix* is picked; click it to open the folder. Stems are saved as 32-bit WAVs in `Documents\ChopLab\<sample name>\Stems\`, and your FL project remembers them (if you delete those files, the project goes back to the full mix and tells you). Once a sample has stems, *Find lyrics* listens to the vocal stem, which is much more accurate than the full mix.
 - **Piano roll** (the *Piano roll* tab at the top): each row is a chop, with its number, note, label or sound type, and lyrics. Click to add a note (it's as long as the chop), drag to move it (up and down changes the chop), drag its right edge to resize, right-click or right-drag to delete, Ctrl+drag to select, Ctrl+C / Ctrl+V to duplicate, arrow keys to nudge, Alt to ignore snap, Ctrl+wheel to zoom. Drag in the velocity lane to set velocities. *Play* (or Space) loops it at the project tempo. *Start from sample order* lays out every chop where it was in the sample, which is a good starting point for a flip. When it's right, use *Drag MIDI to FL* and drop it in FL's piano roll or playlist: the notes play the same chops on this channel.
 - **Shortcuts** (when the plugin window has keyboard focus): Space plays the selected chop, Left/Right moves between chops, Delete merges a chop into the one before, Ctrl+Z / Ctrl+Y undo and redo. FL Studio grabs some keys for itself, and every shortcut also has a button.
 
@@ -54,8 +56,10 @@ It's good, not magic:
 - **Key** works well on melodic material. It often can't tell a key from its relative (C major vs A minor), which is why it shows two guesses.
 - **Time signature**: nobody's detector is reliable here. It picks between 3/4 and 4/4 and leans toward 4/4.
 - **Chop type and chord** are hints from the spectrum. A chop of a full mix usually reads as "Mixed".
-- **Lyrics** are good on clean vocals and acapellas, and get worse the busier the beat underneath is. For a vocal over a full mix, separate the vocal first with FL's stem separation and load the vocal stem. Sung, stretched or mumbled words trip it up more than spoken ones; *Accurate* helps. Word timing is usually within about a quarter of a second, so a word right on the edge of a chop can land on its neighbour; double-click to fix it.
-- **Lyrics need a CPU from about 2013 or later** (AVX2). Older CPUs get a message instead.
+- **Lyrics** are good on clean vocals and acapellas, and get worse the busier the beat underneath is. For a vocal over a full mix, separate stems first so the lyrics come from the vocal stem. Sung, stretched or mumbled words trip it up more than spoken ones; *Accurate* helps. Word timing is usually within about a quarter of a second, so a word right on the edge of a chop can land on its neighbour; double-click to fix it.
+- **Stems** come from Demucs (htdemucs), one of the best open separators, but they aren't perfect: expect a little bleed (hi-hats ghosting in the vocal, reverb tails split between stems), and *Other* is a catch-all for everything that isn't vocals, drums or bass.
+- **Stem separation is slow, and it's heavy.** It runs on your CPU, not your graphics card. On a recent 8-core PC, expect well under a minute for a 30-second sample and a few minutes for a whole song; laptops and older CPUs take longer. Each separation thread needs about 1.5 GB of RAM, so it uses fewer threads (and goes slower) on machines with less memory. FL Studio's own stem separator is faster; ChopLab's advantage is that the stems stay lined up with your chops, labels and lyrics.
+- **Lyrics and stems need a CPU from about 2013 or later** (AVX2). Older CPUs get a message instead.
 - **Re-chopping** (changing mode, sensitivity or grid) replaces the chops, so labels and edits on chops that no longer exist are dropped. Undo brings them back. Piano roll notes stay on the same chop numbers, so after a re-chop they may point at different audio.
 - **Copy/paste into FL's piano roll** isn't possible from a plugin (FL's clipboard is internal), which is why the piano roll uses drag and drop instead.
 
@@ -68,7 +72,7 @@ cmake -B build -A x64
 cmake --build build --config Release --target ChopLab_VST3
 ```
 
-The plugin ends up in `build/ChopLab_artefacts/Release/VST3/ChopLab.vst3`. JUCE, Signalsmith Stretch and whisper.cpp are downloaded automatically during the first configure.
+The plugin ends up in `build/ChopLab_artefacts/Release/VST3/ChopLab.vst3`. JUCE, Signalsmith Stretch, whisper.cpp, demucs.cpp and Eigen are downloaded automatically during the first configure.
 
 Tests:
 
@@ -77,7 +81,9 @@ cmake --build build --config Release --target ChopLabTests ChopLabHostTests Chop
 build/ChopLabTests_artefacts/Release/ChopLabTests            # analysis on synthetic loops with known answers
 build/ChopLabTests_artefacts/Release/ChopLabTests --download-model 0
 build/ChopLabTests_artefacts/Release/ChopLabTests --lyrics-test Tests/fixtures   # speech with known words and timing
-build/ChopLabEngineTests_artefacts/Release/ChopLabEngineTests Tests/fixtures      # piano roll playback, undo, state, lyrics
+build/ChopLabTests_artefacts/Release/ChopLabTests --download-stems-model
+build/ChopLabTests_artefacts/Release/ChopLabTests --stems-test Tests/fixtures    # separates a mix of known parts and scores each stem
+build/ChopLabEngineTests_artefacts/Release/ChopLabEngineTests Tests/fixtures      # piano roll playback, undo, state, stems, lyrics
 build/ChopLabHostTests_artefacts/Release/ChopLabHostTests build/ChopLab_artefacts/Release/VST3/ChopLab.vst3
 ```
 
@@ -89,6 +95,6 @@ ChopLab is free software: you can redistribute it and/or modify it under the ter
 
 If you share a modified version, you have to share its source code under the same license.
 
-ChopLab is built on [JUCE](https://juce.com) (used under the AGPLv3), [whisper.cpp](https://github.com/ggml-org/whisper.cpp) with OpenAI's Whisper models, [Signalsmith Stretch](https://github.com/Signalsmith-Audio/signalsmith-stretch), the Steinberg VST3 SDK and a few libraries bundled with JUCE. Their licenses and copyright notices are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md); `tools/make_third_party_notices.py` regenerates that file after upgrading them.
+ChopLab is built on [JUCE](https://juce.com) (used under the AGPLv3), [whisper.cpp](https://github.com/ggml-org/whisper.cpp) with OpenAI's Whisper models, [demucs.cpp](https://github.com/sevagh/demucs.cpp) with Meta's [Demucs](https://github.com/facebookresearch/demucs) models, [Eigen](https://eigen.tuxfamily.org) (MPL 2.0), [Signalsmith Stretch](https://github.com/Signalsmith-Audio/signalsmith-stretch), the Steinberg VST3 SDK and a few libraries bundled with JUCE. Their licenses and copyright notices are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md); `tools/make_third_party_notices.py` regenerates that file after upgrading them.
 
 VST is a trademark of Steinberg Media Technologies GmbH. FL Studio is a trademark of Image-Line. ChopLab isn't affiliated with or endorsed by either.

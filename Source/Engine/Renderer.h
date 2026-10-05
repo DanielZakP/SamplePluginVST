@@ -22,6 +22,9 @@ struct Processing
 
 Processing combine (const GlobalSettings&, const SliceSettings*, double hostTempoRatio);
 
+// Resamples every channel. ratio = input samples per output sample (2 = half as many samples).
+juce::AudioBuffer<float> resampleAudio (const juce::AudioBuffer<float>&, double ratio);
+
 // Renders [start, end) of the sample with the given processing, resampled to targetRate.
 juce::AudioBuffer<float> renderSegment (const SampleData&, juce::int64 start, juce::int64 end, const Processing&, double targetRate);
 

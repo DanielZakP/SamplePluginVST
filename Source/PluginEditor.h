@@ -6,6 +6,7 @@
 #include "UI/Panels.h"
 #include "UI/PatternView.h"
 #include "UI/SliceTable.h"
+#include "UI/StemsCard.h"
 #include "UI/Theme.h"
 #include "UI/WaveformView.h"
 #include "UI/Widgets.h"
@@ -68,6 +69,7 @@ private:
     choplab::SliceInspector inspector;
     choplab::GlobalPanel globalPanel;
     choplab::LyricsCard lyricsCard;
+    choplab::StemsCard stemsCard;
     choplab::PatternView patternView;
 
     std::unique_ptr<juce::FileChooser> chooser;
@@ -77,7 +79,7 @@ private:
     bool fileDragHover = false;
     double shownHostBpm = 0.0;
 
-    juce::Rectangle<int> header, cards, tempoCard, keyCard, timeCard, projectCard, pageArea, chopBar, statusArea, chopCaption, sensCaption, gapCaption,
+    juce::Rectangle<int> header, cards, tempoCard, keyCard, timeCard, pageArea, chopBar, statusArea, chopCaption, sensCaption, gapCaption,
         gridCaption, manualHint;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ChopLabEditor)

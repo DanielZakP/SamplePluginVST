@@ -103,13 +103,27 @@ juce::File writeLoop (double bpm)
 
 // Builds a ready-made project for screenshots: a sample, a few labels, lyrics words from a text
 // file ("seconds word" per line) and the piano roll filled from the sample's order.
-static int writeDemoState (const juce::File& audio, const juce::File& wordsFile, const juce::File& settingsOut)
+static int writeDemoState (const juce::File& audio, const juce::File& wordsFile, const juce::File& settingsOut, bool withStems)
 {
     ChopLabProcessor p;
     p.prepareToPlay (kRate, 512);
     p.loadFile (audio);
     if (! waitFor ([&] { return ! p.isAnalysing() && p.doc().hasSample(); }))
         return 1;
+    if (withStems)
+    {
+        // Stand-in stems (the mix at different levels), for looking at the layout without the model.
+        StemsResult fake;
+        for (int i = 0; i < kNumStems; ++i)
+        {
+            fake.stems[(size_t) i].makeCopyOf (p.doc().sample->audio);
+            fake.stems[(size_t) i].applyGain (0.3f + 0.15f * (float) i);
+        }
+        p.useSeparatedStems (fake);
+        p.setSource (stemVocals);
+        if (! waitFor ([&] { return ! p.isAnalysing() && p.doc().source == stemVocals; }))
+            return 1;
+    }
     p.fillPatternFromSample();
     auto s0 = p.doc().slices[0].settings;
     s0.label = "kick";
@@ -149,7 +163,7 @@ int main (int argc, char** argv)
     if (argc > 4 && juce::String (argv[1]) == "--demo-state")
     {
         auto f = [] (const char* path) { return juce::File::getCurrentWorkingDirectory().getChildFile (path); };
-        return writeDemoState (f (argv[2]), f (argv[3]), f (argv[4]));
+        return writeDemoState (f (argv[2]), f (argv[3]), f (argv[4]), argc > 5 && juce::String (argv[5]) == "stems");
     }
     const auto fixtures = juce::File::getCurrentWorkingDirectory().getChildFile (argc > 1 ? argv[1] : "Tests/fixtures");
 
@@ -249,6 +263,82 @@ int main (int argc, char** argv)
     check (reopened->doc().lyrics.model == 1 && reopened->doc().lyrics.requestedLanguage == "es", "lyrics settings restored");
     reopened = nullptr;
 
+    std::cout << "Stems (made up here, so no model is needed)\n";
+    {
+        const auto mixPeak = proc->doc().sample->audio.getMagnitude (0, proc->doc().sample->audio.getNumSamples());
+        auto peakPlaying = [] (const ChopLabProcessor& pr) { return pr.doc().sample->audio.getMagnitude (0, pr.doc().sample->audio.getNumSamples()); };
+        StemsResult fake;
+        for (int i = 0; i < kNumStems; ++i)
+        {
+            fake.stems[(size_t) i].makeCopyOf (proc->doc().sample->audio);
+            fake.stems[(size_t) i].applyGain (0.1f * (float) (i + 1)); // each stem is the loop at its own level
+        }
+        std::vector<juce::int64> startsBefore;
+        for (const auto& sl : proc->doc().slices)
+            startsBefore.push_back (sl.start);
+        const double bpmBefore = proc->doc().bpm;
+
+        proc->useSeparatedStems (fake);
+        check (proc->doc().stems != nullptr && proc->doc().source == -1, "stems kept, the mix still plays");
+        bool filesOk = true;
+        for (int i = 0; i < kNumStems; ++i)
+            filesOk = filesOk && proc->stemFile (i).existsAsFile();
+        check (filesOk, "stem files saved for dragging");
+
+        proc->setSource (stemDrums);
+        check (waitFor ([&] { return ! proc->isAnalysing() && proc->doc().source == stemDrums; }), "switched to the drum stem");
+        check (std::abs (peakPlaying (*proc) - 0.2f * mixPeak) < 1.0e-4f, "chops play the drum stem");
+        std::vector<juce::int64> startsAfter;
+        for (const auto& sl : proc->doc().slices)
+            startsAfter.push_back (sl.start);
+        check (startsAfter == startsBefore && std::abs (proc->doc().bpm - bpmBefore) < 1.0e-9, "same chops and tempo");
+        check (proc->doc().lyricsFor (3) == "oh yeah" && proc->doc().pattern.notes.size() == 32, "lyrics and pattern untouched");
+        check (proc->canUndo(), "undo history kept");
+        pump (300);
+        proc->previewSlice (0);
+        const auto preview = render (*proc, 0.3);
+        const float chopPeak = proc->doc().sample->audio.getMagnitude (0, (int) proc->doc().slices[0].end);
+        check (std::abs (preview.getMagnitude (0, preview.getNumSamples()) - chopPeak) < 0.02f, "and what plays is the stem");
+
+        juce::MemoryBlock stemState;
+        proc->getStateInformation (stemState);
+        auto reopened = std::make_unique<ChopLabProcessor>();
+        reopened->prepareToPlay (kRate, 512);
+        reopened->setStateInformation (stemState.getData(), (int) stemState.getSize());
+        check (waitFor ([&] { return ! reopened->isAnalysing() && reopened->doc().hasSample(); }), "project with stems reopens");
+        check (reopened->doc().stems != nullptr && reopened->doc().source == stemDrums
+                   && std::abs (peakPlaying (*reopened) - 0.2f * mixPeak) < 1.0e-4f,
+               "still playing the drum stem, read back from its file");
+        check (std::abs (reopened->doc().mix()->audio.getMagnitude (0, reopened->doc().mix()->audio.getNumSamples()) - mixPeak) < 1.0e-3f,
+               "the project itself holds the full mix");
+        reopened = nullptr;
+
+        const auto lastDrum = proc->doc().sample->audio.getSample (0, proc->doc().sample->audio.getNumSamples() - 1);
+        proc->setReversed (true);
+        check (waitFor ([&] { return ! proc->isAnalysing() && proc->doc().reversed; }), "reversed");
+        check (proc->doc().stems != nullptr && proc->doc().source == stemDrums
+                   && std::abs (proc->doc().sample->audio.getSample (0, 0) - lastDrum) < 1.0e-6f,
+               "the stems reverse with it");
+        proc->setReversed (false);
+        check (waitFor ([&] { return ! proc->isAnalysing() && ! proc->doc().reversed; }), "and back");
+
+        for (const auto& f : proc->doc().stems->files)
+            f.deleteFile();
+        auto again = std::make_unique<ChopLabProcessor>();
+        again->prepareToPlay (kRate, 512);
+        again->setStateInformation (stemState.getData(), (int) stemState.getSize());
+        check (waitFor ([&] { return ! again->isAnalysing() && again->doc().hasSample(); }), "reopens with the stem files gone");
+        check (again->doc().stems == nullptr && again->doc().source == -1 && again->getError().isNotEmpty(),
+               "falls back to the mix and says why: " + again->getError());
+        again = nullptr;
+        check (proc->stemFile (stemVocals).existsAsFile(), "a deleted stem file is written again when it's dragged");
+
+        proc->setSource (-1);
+        check (waitFor ([&] { return ! proc->isAnalysing() && proc->doc().source == -1; }) && std::abs (peakPlaying (*proc) - mixPeak) < 1.0e-4f,
+               "back to the full mix");
+        proc->getDragFolder().deleteRecursively();
+    }
+
     std::cout << "Finding lyrics through the plugin\n";
     const auto speech = fixtures.getChildFile ("speech_en.wav");
     proc->loadFile (speech);
@@ -271,6 +361,28 @@ int main (int argc, char** argv)
         for (int i = 0; i < (int) proc->doc().slices.size(); ++i)
             all << proc->doc().lyricsFor (i) << " ";
         check (all.toLowerCase().contains ("hello"), "chops show their words: " + all.trim());
+
+        // With stems, the words come from the vocal stem: make it Spanish speech and see.
+        juce::AudioFormatManager formats;
+        formats.registerBasicFormats();
+        std::unique_ptr<juce::AudioFormatReader> es (formats.createReaderFor (fixtures.getChildFile ("speech_es.wav")));
+        const auto& mixAudio = proc->doc().sample->audio;
+        StemsResult fake;
+        for (auto& stem : fake.stems)
+        {
+            stem.setSize (mixAudio.getNumChannels(), mixAudio.getNumSamples());
+            stem.clear();
+        }
+        es->read (&fake.stems[stemVocals], 0, juce::jmin ((int) es->lengthInSamples, mixAudio.getNumSamples()), 0, true, false);
+        proc->useSeparatedStems (fake);
+        proc->findLyrics();
+        waitFor ([&]
+        {
+            const auto st = proc->getLyricsStatus().phase;
+            return st == ChopLabProcessor::LyricsStatus::done || st == ChopLabProcessor::LyricsStatus::failed;
+        }, 240000);
+        check (proc->doc().lyrics.language == "es", "with stems, lyrics come from the vocal stem (heard " + proc->doc().lyrics.language + ")");
+        proc->getDragFolder().deleteRecursively();
     }
     else
     {

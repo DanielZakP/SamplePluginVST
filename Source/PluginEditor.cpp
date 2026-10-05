@@ -30,6 +30,7 @@ ChopLabEditor::ChopLabEditor (ChopLabProcessor& p)
       inspector (p, [this] (int i) { return exportChop (i); }),
       globalPanel (p),
       lyricsCard (p),
+      stemsCard (p),
       patternView (p)
 {
     setWantsKeyboardFocus (true);
@@ -159,6 +160,7 @@ ChopLabEditor::ChopLabEditor (ChopLabProcessor& p)
     addAndMakeVisible (inspector);
     addAndMakeVisible (globalPanel);
     addAndMakeVisible (lyricsCard);
+    addAndMakeVisible (stemsCard);
     addChildComponent (patternView);
 
     for (auto* tab : { &chopsTab, &rollTab })
@@ -253,6 +255,7 @@ void ChopLabEditor::refresh()
     inspector.documentChanged();
     globalPanel.documentChanged();
     lyricsCard.documentChanged();
+    stemsCard.documentChanged();
     patternView.documentChanged();
     repaint();
 }
@@ -281,7 +284,6 @@ void ChopLabEditor::timerCallback()
     if (std::abs (proc.getHostBpm() - shownHostBpm) > 0.001)
     {
         shownHostBpm = proc.getHostBpm();
-        repaint (projectCard);
         globalPanel.repaint();
     }
     if (status.isNotEmpty() && ! statusIsError && ! proc.isAnalysing() && juce::Time::getMillisecondCounter() - statusTime > 7000)
@@ -446,7 +448,7 @@ void ChopLabEditor::paintCards (juce::Graphics& g)
     const auto& d = proc.doc();
     const bool has = d.hasSample();
 
-    for (auto r : { tempoCard, keyCard, timeCard, projectCard })
+    for (auto r : { tempoCard, keyCard, timeCard })
     {
         g.setColour (theme::panel);
         g.fillRoundedRectangle (r.toFloat(), 8.0f);
@@ -512,13 +514,6 @@ void ChopLabEditor::paintCards (juce::Graphics& g)
         juce::ignoreUnused (first);
         sub (timeCard, s);
     }
-
-    // Project
-    drawCaption (g, projectCard.reduced (12, 8), "Project (FL Studio)");
-    big (projectCard.reduced (12, 0).withTrimmedTop (22).withHeight (30), formatBpm (proc.getHostBpm()) + " BPM", theme::textDim);
-    if (has)
-        sub (projectCard, d.global.syncToHost ? "Chops follow the project tempo" : "Sync is off (Whole sample panel)",
-             d.global.syncToHost ? theme::good : theme::textFaint);
 }
 
 void ChopLabEditor::paint (juce::Graphics& g)
@@ -628,16 +623,16 @@ void ChopLabEditor::resized()
     {
         auto c = cards;
         const int gap = 10;
-        const int w = (c.getWidth() - 4 * gap) / 5;
-        tempoCard = c.removeFromLeft (w);
+        const int available = c.getWidth() - 4 * gap;
+        tempoCard = c.removeFromLeft (available * 19 / 100);
         c.removeFromLeft (gap);
-        keyCard = c.removeFromLeft (w);
+        keyCard = c.removeFromLeft (available * 17 / 100);
         c.removeFromLeft (gap);
-        timeCard = c.removeFromLeft (w);
+        timeCard = c.removeFromLeft (available * 17 / 100);
         c.removeFromLeft (gap);
-        lyricsCard.setBounds (c.removeFromLeft (w + 40));
+        lyricsCard.setBounds (c.removeFromLeft ((c.getWidth() - gap) / 2));
         c.removeFromLeft (gap);
-        projectCard = c;
+        stemsCard.setBounds (c);
 
         auto t = tempoCard.reduced (12, 0).withTrimmedTop (22).withHeight (32);
         doubleButton.setBounds (t.removeFromRight (36).reduced (0, 3));

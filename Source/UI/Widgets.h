@@ -65,6 +65,18 @@ public:
         setMouseCursor (juce::MouseCursor::DraggingHandCursor);
     }
 
+    void setText (const juce::String& t)
+    {
+        if (t != text)
+        {
+            text = t;
+            repaint();
+        }
+    }
+
+    // Set to drag several files at once instead of the one from makeFile.
+    std::function<juce::StringArray()> makeFiles;
+
     void paint (juce::Graphics& g) override
     {
         auto r = getLocalBounds().toFloat().reduced (0.5f);
@@ -99,9 +111,13 @@ public:
         if (started || e.getDistanceFromDragStart() < 6 || ! isEnabled())
             return;
         started = true;
-        const auto file = makeFile();
-        if (file.existsAsFile())
-            juce::DragAndDropContainer::performExternalDragDropOfFiles ({ file.getFullPathName() }, false, this);
+        juce::StringArray files;
+        if (makeFiles)
+            files = makeFiles();
+        else if (const auto file = makeFile(); file.existsAsFile())
+            files.add (file.getFullPathName());
+        if (! files.isEmpty())
+            juce::DragAndDropContainer::performExternalDragDropOfFiles (files, false, this);
     }
 
     void mouseUp (const juce::MouseEvent& e) override

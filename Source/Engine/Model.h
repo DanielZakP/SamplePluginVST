@@ -2,7 +2,9 @@
 
 #include "Analysis/Analysis.h"
 #include "Lyrics/Lyrics.h"
+#include "Stems/Stems.h"
 #include <juce_audio_basics/juce_audio_basics.h>
+#include <array>
 #include <memory>
 #include <vector>
 
@@ -98,10 +100,21 @@ struct SampleData
     double lengthSeconds() const { return audio.getNumSamples() / sampleRate; }
 };
 
+// Stems split from the mix. Same length, rate and direction (reversed or not) as the mix.
+struct StemSet
+{
+    std::shared_ptr<const SampleData> mix;
+    std::array<std::shared_ptr<const SampleData>, kNumStems> stems;
+    std::array<juce::File, kNumStems> files; // the WAVs on disk (always the forward version)
+    std::array<juce::int64, kNumStems> hashes {}; // of the audio in those files, to know them again
+};
+
 // Everything the editor shows. Owned and mutated on the message thread.
 struct Document
 {
-    std::shared_ptr<const SampleData> sample;
+    std::shared_ptr<const SampleData> sample; // what plays: the mix, or one of its stems
+    std::shared_ptr<const StemSet> stems;     // null until the mix is separated
+    int source = -1;                          // -1 = the mix, otherwise a StemKind
     std::shared_ptr<const AnalysisFeatures> features;
     std::vector<OnsetCandidate> onsets;
 
@@ -122,6 +135,8 @@ struct Document
     Pattern pattern;
 
     bool hasSample() const { return sample != nullptr && sample->audio.getNumSamples() > 0; }
+    // The full mix, whichever source is playing. Chops, lyrics and tempo belong to its timeline.
+    std::shared_ptr<const SampleData> mix() const { return stems != nullptr ? stems->mix : sample; }
     juce::int64 length() const { return sample != nullptr ? sample->audio.getNumSamples() : 0; }
     double sampleRate() const { return sample != nullptr ? sample->sampleRate : 44100.0; }
     double secondsAt (juce::int64 pos) const { return (double) pos / sampleRate(); }

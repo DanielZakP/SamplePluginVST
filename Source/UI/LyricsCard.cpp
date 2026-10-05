@@ -8,7 +8,7 @@ namespace choplab
 LyricsCard::LyricsCard (ChopLabProcessor& p) : proc (p)
 {
     findButton.setTooltip ("Listen for words in the sample and put them on the chops they fall in. "
-                           "Works best on clean vocals: separate the vocal with FL's stem separation first if it's over a beat.");
+                           "Works best on clean vocals: if there's a beat under them, separate stems first and the words come from the vocal stem.");
     findButton.onClick = [this]
     {
         const auto phase = proc.getLyricsStatus().phase;
@@ -121,6 +121,7 @@ void LyricsCard::paint (juce::Graphics& g)
 
     juce::Colour colour;
     const auto text = statusText (colour);
+    setTooltip (text); // the status line is short; errors can be long
     const auto s = proc.getLyricsStatus();
     if (s.phase == ChopLabProcessor::LyricsStatus::downloading || s.phase == ChopLabProcessor::LyricsStatus::transcribing)
     {

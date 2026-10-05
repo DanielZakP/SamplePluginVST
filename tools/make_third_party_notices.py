@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Regenerates THIRD_PARTY_NOTICES.md from the license files of the libraries compiled into
-ChopLab. Run it after upgrading JUCE, whisper.cpp or Signalsmith (with their sources in libs/)."""
+ChopLab. Run it after upgrading JUCE, whisper.cpp, demucs.cpp, Eigen or Signalsmith (with their
+sources in libs/)."""
 
 import pathlib
 import re
@@ -31,6 +32,14 @@ components = [
     ("Whisper models", "Speech model files, downloaded by the plugin on first use (not included in the plugin)", "MIT",
      "Copyright (c) 2022 OpenAI. Released under the MIT License (https://github.com/openai/whisper/blob/main/LICENSE). "
      "ChopLab downloads the ggml conversions published by the whisper.cpp project."),
+    ("demucs.cpp", "Stem separation (Demucs v4 in plain C++)", "MIT", read(libs / "demucs.cpp/LICENSE")),
+    ("Eigen", "Maths used by demucs.cpp", "MPL 2.0",
+     "Eigen is used unmodified (version 3.4.1). Its source code is available at "
+     "https://gitlab.com/libeigen/eigen/-/tree/3.4.1\n\n" + read(libs / "eigen/COPYING.MPL2")),
+    ("Demucs models", "Stem separation model file, downloaded by the plugin on first use (not included in the plugin)", "MIT",
+     "Copyright (c) Meta Platforms, Inc. and affiliates. Hybrid Transformer Demucs (htdemucs) by Alexandre Defossez and "
+     "Simon Rouard, released under the MIT License (https://github.com/facebookresearch/demucs/blob/main/LICENSE). "
+     "ChopLab downloads the conversion for demucs.cpp published at https://huggingface.co/datasets/Retrobear/demucs.cpp."),
     ("Signalsmith Stretch", "Pitch shifting and time stretching", "MIT", read(libs / "signalsmith-stretch/LICENSE.txt")),
     ("Signalsmith Linear", "FFT and maths used by Signalsmith Stretch", "MIT", read(libs / "signalsmith-linear/LICENSE.txt")),
     ("FLAC", "Reading FLAC files and storing samples inside projects (bundled with JUCE)", "BSD",

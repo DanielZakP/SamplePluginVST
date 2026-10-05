@@ -7,7 +7,7 @@ on:
 
 jobs:
   lyrics-linux:
-    name: Lyrics engine (Linux, quick check)
+    name: Lyrics and stems engines (Linux)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -17,17 +17,21 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq ninja-build libasound2-dev libfreetype-dev libfontconfig1-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxext-dev libgl1-mesa-dev xvfb
 
-      - name: Cache speech model
+      - name: Cache models
         uses: actions/cache@v4
         with:
           path: ~/.config/ChopLab/Models
-          key: whisper-ggml-base-q5_1
+          key: models-whisper-base-q5_1-htdemucs-4s-f16
 
-      - name: Download speech model
+      - name: Download models
         run: |
           mkdir -p ~/.config/ChopLab/Models
-          test -f ~/.config/ChopLab/Models/ggml-base-q5_1.bin || curl -L --fail -o ~/.config/ChopLab/Models/ggml-base-q5_1.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q5_1.bin
-          ls -la ~/.config/ChopLab/Models
+          cd ~/.config/ChopLab/Models
+          test -f ggml-base-q5_1.bin || curl -L --fail -o ggml-base-q5_1.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q5_1.bin
+          test -f ggml-model-htdemucs-4s-f16.bin || curl -L --fail -o ggml-model-htdemucs-4s-f16.bin https://huggingface.co/datasets/Retrobear/demucs.cpp/resolve/main/ggml-model-htdemucs-4s-f16.bin
+          ls -la
+          sha256sum *.bin | tee ~/models.txt
+          echo "::notice title=models::$(stat -c '%n %s' *.bin | tr '\n' ' ') $(sha256sum *.bin | tr '\n' ' ')"
 
       - name: Build tests
         run: |
@@ -40,13 +44,16 @@ jobs:
       - name: Lyrics tests
         run: build/ChopLabTests_artefacts/Release/ChopLabTests --lyrics-test Tests/fixtures 0 2>&1 | tee lyrics.txt; exit ${PIPESTATUS[0]}
 
-      - name: Engine tests (pattern playback, undo, lyrics through the plugin)
+      - name: Stem separation tests (real model, threads, cancel, formats)
+        run: build/ChopLabTests_artefacts/Release/ChopLabTests --stems-test Tests/fixtures 2>&1 | grep -v "^Load\|^load_demucs\|^Check\|^Model" | tee stems.txt; exit ${PIPESTATUS[0]}
+
+      - name: Engine tests (pattern playback, undo, stems and lyrics through the plugin)
         run: xvfb-run -a build/ChopLabEngineTests_artefacts/Release/ChopLabEngineTests Tests/fixtures 2>&1 | tee engine.txt; exit ${PIPESTATUS[0]}
 
       - name: Report test output
         if: always()
         run: |
-          for f in lyrics.txt engine.txt; do
+          for f in lyrics.txt stems.txt engine.txt; do
             [ -f "$f" ] || continue
             body=$(tail -c 3500 "$f" | sed 's/%/%25/g' | sed ':a;N;$!ba;s/\n/%0A/g')
             echo "::notice title=$f::$body"
@@ -67,8 +74,10 @@ jobs:
       - name: Analysis tests (tempo, key, time signature, chop points)
         run: build/ChopLabTests_artefacts/Release/ChopLabTests.exe
 
-      - name: Download speech model (same code the plugin uses)
-        run: build/ChopLabTests_artefacts/Release/ChopLabTests.exe --download-model 0
+      - name: Download models (same code the plugin uses)
+        run: |
+          build/ChopLabTests_artefacts/Release/ChopLabTests.exe --download-model 0
+          build/ChopLabTests_artefacts/Release/ChopLabTests.exe --download-stems-model
 
       - name: Lyrics tests
         shell: pwsh
@@ -76,7 +85,13 @@ jobs:
           & build/ChopLabTests_artefacts/Release/ChopLabTests.exe --lyrics-test Tests/fixtures 0 2>&1 | Tee-Object -FilePath lyrics.txt
           exit $LASTEXITCODE
 
-      - name: Engine tests (pattern playback, undo, lyrics through the plugin)
+      - name: Stem separation tests
+        shell: pwsh
+        run: |
+          & build/ChopLabTests_artefacts/Release/ChopLabTests.exe --stems-test Tests/fixtures quick 2>&1 | Select-String -NotMatch -Pattern "^(Load|load_demucs|Check|Model)" | Tee-Object -FilePath stems.txt
+          exit $LASTEXITCODE
+
+      - name: Engine tests (pattern playback, undo, stems and lyrics through the plugin)
         shell: pwsh
         run: |
           & build/ChopLabEngineTests_artefacts/Release/ChopLabEngineTests.exe Tests/fixtures 2>&1 | Tee-Object -FilePath engine.txt
@@ -97,7 +112,7 @@ jobs:
         if: always()
         shell: pwsh
         run: |
-          foreach ($f in @("lyrics.txt", "engine.txt")) {
+          foreach ($f in @("lyrics.txt", "stems.txt", "engine.txt")) {
             if (-not (Test-Path $f)) { continue }
             $body = Get-Content $f -Raw
             if ($body.Length -gt 3500) { $body = $body.Substring($body.Length - 3500) }

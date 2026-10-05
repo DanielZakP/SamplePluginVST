@@ -102,6 +102,29 @@ public:
     void setSliceLyrics (int index, const juce::String& text);
     void resetSliceLyrics (int index);
 
+    // Stems: separation runs in the background (downloading the model first if needed). Once
+    // separated, any stem can be what the chops play; chops, tempo and lyrics stay as they are.
+    struct StemsStatus
+    {
+        enum Phase
+        {
+            idle,
+            downloading,
+            separating,
+            done,
+            failed
+        };
+        Phase phase = idle;
+        float progress = 0.0f;
+        juce::String message;
+    };
+    StemsStatus getStemsStatus() const;
+    void separateStems();
+    void cancelStems();
+    void setSource (int source); // -1 = the full mix, otherwise a choplab::StemKind
+    juce::File stemFile (int stem) const; // the stem's WAV on disk, for dragging into FL
+    void useSeparatedStems (choplab::StemsResult); // as if separation had just finished (for tests)
+
     // Built-in piano roll
     // newEdit = start of a separate undo step; pass false while dragging so the drag is one step.
     void setPattern (const choplab::Pattern&, bool newEdit = true);
@@ -132,6 +155,7 @@ private:
     void handleAsyncUpdate() override;
     void applyLoadResult (std::unique_ptr<LoadResult>);
     void applyLyricsResult();
+    void applyStemsResult();
     void timerCallback() override;
 
     std::vector<juce::int64> markersFor (const choplab::Document&) const;
@@ -197,6 +221,21 @@ private:
     std::atomic<float> lyricsProgress { 0.0f };
     juce::String lyricsMessage; // guarded by resultLock
     std::unique_ptr<LyricsJobResult> pendingLyrics;
+
+    struct StemsJobResult
+    {
+        int generation = 0;
+        const choplab::SampleData* mix = nullptr;
+        std::shared_ptr<const choplab::StemSet> stems;
+        juce::String error;
+        bool cancelled = false;
+    };
+    juce::ThreadPool stemsPool { 1 };
+    std::atomic<int> stemsGeneration { 0 };
+    std::atomic<int> stemsPhase { StemsStatus::idle };
+    std::atomic<float> stemsProgress { 0.0f };
+    juce::String stemsMessage; // guarded by resultLock
+    std::unique_ptr<StemsJobResult> pendingStems;
 
     mutable juce::CriticalSection encodedLock;
     mutable std::shared_ptr<const EncodedAudio> encodedCache;

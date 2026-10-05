@@ -260,6 +260,9 @@ int downloadModelCommand (int model);
 int printLyricsCommand (const juce::File& file, const juce::String& lang, int model);
 int lyricsTestCommand (const juce::File& fixtures, int model);
 int lyricsSnapTest (const juce::File& fixtures);
+int downloadStemsModelCommand();
+int stemsTestCommand (const juce::File& fixtures, bool quick);
+int stemsBenchCommand (double seconds, int workers, const juce::File& model);
 
 int main (int argc, char** argv)
 {
@@ -272,6 +275,12 @@ int main (int argc, char** argv)
         return lyricsTestCommand (cwdFile (arg (2)), arg (3).getIntValue());
     if (command == "--lyrics")
         return printLyricsCommand (cwdFile (arg (2)), arg (3), arg (4).getIntValue());
+    if (command == "--download-stems-model")
+        return downloadStemsModelCommand();
+    if (command == "--stems-test")
+        return stemsTestCommand (cwdFile (arg (2)), arg (3) == "quick");
+    if (command == "--stems-bench")
+        return stemsBenchCommand (arg (2).getDoubleValue(), arg (3).getIntValue(), cwdFile (arg (4)));
 
     if (argc > 2 && juce::String (argv[1]) == "--write-demo")
     {

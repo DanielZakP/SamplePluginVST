@@ -11,9 +11,20 @@ struct ChopLabProcessor::LoadJob
     juce::String name;
     juce::MemoryBlock embedded; // FLAC saved in the project
     float embeddedScale = 1.0f;
-    std::shared_ptr<const SampleData> sample; // already in memory (e.g. reversing)
+    std::shared_ptr<const SampleData> sample; // the mix, already in memory (e.g. reversing)
     bool restore = false;
     Document saved; // settings and chops to restore (no audio)
+
+    std::shared_ptr<const StemSet> stems;      // already in memory (switching source, reversing)
+    std::array<juce::File, kNumStems> stemFiles; // or saved next to a project, to read back
+    std::array<juce::int64, kNumStems> stemHashes {};
+    int source = -1;
+    // Only the playing audio changes: tempo, key and the undo history stay, and lyrics and
+    // separation carry on.
+    bool switchingSource = false;
+    TempoResult tempo;
+    GridResult grid;
+    KeyResult key;
 };
 
 struct ChopLabProcessor::LoadResult
@@ -28,6 +39,10 @@ struct ChopLabProcessor::LoadResult
     KeyResult key;
     bool restore = false;
     Document saved;
+    std::shared_ptr<const StemSet> stems;
+    int source = -1;
+    bool switchingSource = false;
+    juce::String note; // a problem worth mentioning that didn't stop the load
 };
 
 namespace
@@ -57,7 +72,7 @@ juce::String editTag (const GlobalSettings& g, const SliceSettings* s, double ho
     return parts.isEmpty() ? juce::String() : " [" + parts.joinIntoString (" ") + "]";
 }
 
-bool writeWav (const juce::AudioBuffer<float>& buffer, double rate, const juce::File& file)
+bool writeWav (const juce::AudioBuffer<float>& buffer, double rate, const juce::File& file, int bits = 24)
 {
     file.deleteFile();
     std::unique_ptr<juce::OutputStream> stream = std::make_unique<juce::FileOutputStream> (file);
@@ -68,8 +83,96 @@ bool writeWav (const juce::AudioBuffer<float>& buffer, double rate, const juce::
     auto writer = wav.createWriterFor (stream, juce::AudioFormatWriterOptions {}
                                                    .withSampleRate (rate)
                                                    .withNumChannels (buffer.getNumChannels())
-                                                   .withBitsPerSample (24));
+                                                   .withBitsPerSample (bits));
     return writer != nullptr && writer->writeFromAudioSampleBuffer (buffer, 0, buffer.getNumSamples());
+}
+
+// Fingerprint of a stem's audio, so a project only takes back stem files that still hold its stems.
+juce::int64 audioHash (const juce::AudioBuffer<float>& audio)
+{
+    juce::uint64 h = 14695981039346656037ull;
+    for (int c = 0; c < audio.getNumChannels(); ++c)
+    {
+        const auto* d = audio.getReadPointer (c);
+        for (int i = 0; i < audio.getNumSamples(); ++i)
+        {
+            juce::uint32 bits;
+            std::memcpy (&bits, d + i, sizeof (bits));
+            h = (h ^ bits) * 1099511628211ull;
+        }
+    }
+    return (juce::int64) (h & 0x7fffffffffffffffull);
+}
+
+juce::AudioBuffer<float> forwards (const SampleData& data, bool reversed)
+{
+    juce::AudioBuffer<float> audio (data.audio);
+    if (reversed)
+        audio.reverse (0, audio.getNumSamples());
+    return audio;
+}
+
+std::shared_ptr<SampleData> stemSample (juce::AudioBuffer<float> audio, const SampleData& mix, int stem, const juce::File& file)
+{
+    auto data = std::make_shared<SampleData>();
+    data->audio = std::move (audio);
+    data->sampleRate = mix.sampleRate;
+    data->name = mix.name + " (" + stemName (stem) + ")";
+    data->file = file;
+    return data;
+}
+
+// Saves the stems (forwards, as 32-bit float so nothing clips) and keeps them in memory the way
+// the mix plays. A stem that can't be saved still works; it's written again when dragged out.
+std::shared_ptr<const StemSet> makeStemSet (StemsResult& result, const std::shared_ptr<const SampleData>& mix, bool reversed,
+                                            const juce::File& folder)
+{
+    auto set = std::make_shared<StemSet>();
+    set->mix = mix;
+    folder.createDirectory();
+    for (int i = 0; i < kNumStems; ++i)
+    {
+        auto& audio = result.stems[(size_t) i];
+        set->hashes[(size_t) i] = audioHash (audio);
+        auto file = folder.getChildFile (legalName (mix->name) + " - " + stemName (i) + ".wav");
+        if (! writeWav (audio, mix->sampleRate, file, 32))
+        {
+            file = file.getNonexistentSibling();
+            if (! writeWav (audio, mix->sampleRate, file, 32))
+                file = juce::File();
+        }
+        set->files[(size_t) i] = file;
+        if (reversed)
+            audio.reverse (0, audio.getNumSamples());
+        set->stems[(size_t) i] = stemSample (std::move (audio), *mix, i, file);
+    }
+    return set;
+}
+
+std::shared_ptr<const StemSet> readStems (const std::array<juce::File, kNumStems>& files, const std::array<juce::int64, kNumStems>& hashes,
+                                          const std::shared_ptr<const SampleData>& mix, bool reversed)
+{
+    auto set = std::make_shared<StemSet>();
+    set->mix = mix;
+    set->files = files;
+    set->hashes = hashes;
+    juce::AudioFormatManager formats;
+    formats.registerBasicFormats();
+    const int length = mix->audio.getNumSamples();
+    for (int i = 0; i < kNumStems; ++i)
+    {
+        std::unique_ptr<juce::AudioFormatReader> reader (files[(size_t) i].existsAsFile() ? formats.createReaderFor (files[(size_t) i]) : nullptr);
+        if (reader == nullptr || reader->lengthInSamples != length || std::abs (reader->sampleRate - mix->sampleRate) > 0.5)
+            return nullptr;
+        juce::AudioBuffer<float> audio (mix->audio.getNumChannels(), length);
+        reader->read (&audio, 0, length, 0, true, true);
+        if (audioHash (audio) != hashes[(size_t) i])
+            return nullptr;
+        if (reversed)
+            audio.reverse (0, length);
+        set->stems[(size_t) i] = stemSample (std::move (audio), *mix, i, files[(size_t) i]);
+    }
+    return set;
 }
 } // namespace
 
@@ -88,7 +191,9 @@ ChopLabProcessor::~ChopLabProcessor()
     stopTimer();
     cancelPendingUpdate();
     ++lyricsGeneration; // makes a running download or transcription stop at its next check
+    ++stemsGeneration;
     lyricsPool.removeAllJobs (true, 30000);
+    stemsPool.removeAllJobs (true, 60000);
     loadPool.removeAllJobs (true, 10000);
 }
 
@@ -413,7 +518,11 @@ void ChopLabProcessor::loadFile (const juce::File& file)
 
 void ChopLabProcessor::startLoad (std::unique_ptr<LoadJob> job)
 {
-    cancelLyrics(); // they'd belong to the old audio
+    if (! job->switchingSource)
+    {
+        cancelLyrics(); // they'd belong to the old audio
+        cancelStems();
+    }
     job->generation = ++loadGeneration;
     analysing = true;
     lastError = {};
@@ -477,12 +586,37 @@ std::unique_ptr<ChopLabProcessor::LoadResult> ChopLabProcessor::runLoad (const L
         sample = data;
     }
 
-    result->sample = sample;
-    auto features = std::make_shared<AnalysisFeatures> (computeFeatures (sample->audio, sample->sampleRate));
-    result->onsets = detectOnsets (*features, sample->audio);
-    result->tempo = estimateTempo (*features, result->onsets);
-    result->grid = estimateGrid (*features, result->onsets, result->tempo.bpm, {}, true, result->tempo.loopDetected);
-    result->key = estimateKey (*features);
+    // Stems: handed over (switching source, reversing) or read back from next to the project.
+    auto stems = job.stems;
+    if (stems == nullptr && job.stemFiles[0] != juce::File())
+    {
+        stems = readStems (job.stemFiles, job.stemHashes, sample, job.saved.reversed);
+        if (stems == nullptr)
+            result->note = "The stems separated for this project are gone or changed on disk. Separate again to get them back.";
+    }
+    result->stems = stems;
+    result->source = stems != nullptr ? juce::jlimit (-1, kNumStems - 1, job.source) : -1;
+    result->switchingSource = job.switchingSource;
+    const auto playing = result->source >= 0 ? stems->stems[(size_t) result->source] : sample;
+    result->sample = playing;
+
+    // Chop points and chop descriptions come from what plays; tempo, meter and key from the mix.
+    auto features = std::make_shared<AnalysisFeatures> (computeFeatures (playing->audio, playing->sampleRate));
+    result->onsets = detectOnsets (*features, playing->audio);
+    if (job.switchingSource)
+    {
+        result->tempo = job.tempo;
+        result->grid = job.grid;
+        result->key = job.key;
+    }
+    else
+    {
+        auto mixFeatures = playing == sample ? features : std::make_shared<AnalysisFeatures> (computeFeatures (sample->audio, sample->sampleRate));
+        const auto mixOnsets = playing == sample ? result->onsets : detectOnsets (*mixFeatures, sample->audio);
+        result->tempo = estimateTempo (*mixFeatures, mixOnsets);
+        result->grid = estimateGrid (*mixFeatures, mixOnsets, result->tempo.bpm, {}, true, result->tempo.loopDetected);
+        result->key = estimateKey (*mixFeatures);
+    }
     result->features = features;
     return result;
 }
@@ -496,6 +630,7 @@ void ChopLabProcessor::handleAsyncUpdate()
     }
     applyLoadResult (std::move (result));
     applyLyricsResult();
+    applyStemsResult();
 }
 
 void ChopLabProcessor::applyLoadResult (std::unique_ptr<LoadResult> result)
@@ -513,6 +648,8 @@ void ChopLabProcessor::applyLoadResult (std::unique_ptr<LoadResult> result)
 
     Document d;
     d.sample = result->sample;
+    d.stems = result->stems;
+    d.source = result->source;
     d.features = result->features;
     d.onsets = std::move (result->onsets);
     d.detectedTempo = result->tempo;
@@ -557,9 +694,16 @@ void ChopLabProcessor::applyLoadResult (std::unique_ptr<LoadResult> result)
         const juce::ScopedLock sl (docLock);
         document = std::move (d);
     }
-    clearHistory(); // positions in old snapshots don't apply to new (or reversed) audio
-    selectedSlice = document.slices.empty() ? -1 : 0;
-    lastError = {};
+    if (result->switchingSource)
+    {
+        selectedSlice = juce::jmin (selectedSlice, (int) document.slices.size() - 1);
+    }
+    else
+    {
+        clearHistory(); // positions in old snapshots don't apply to new (or reversed) audio
+        selectedSlice = document.slices.empty() ? -1 : 0;
+    }
+    lastError = result->note;
     requestRender();
     publishPattern();
     sendChangeMessage();
@@ -784,13 +928,26 @@ void ChopLabProcessor::setReversed (bool shouldBeReversed)
     if (! document.hasSample() || shouldBeReversed == document.reversed || analysing)
         return;
 
-    auto reversedSample = std::make_shared<SampleData> (*document.sample);
-    reversedSample->audio.reverse (0, reversedSample->audio.getNumSamples());
+    auto reversedMix = std::make_shared<SampleData> (*document.mix());
+    reversedMix->audio.reverse (0, reversedMix->audio.getNumSamples());
 
-    // Mirror everything: chops keep their settings, bar lines stay bar lines.
+    // Mirror everything: chops keep their settings, bar lines stay bar lines, stems flip too.
     auto job = std::make_unique<LoadJob>();
-    job->sample = reversedSample;
+    job->sample = reversedMix;
     job->restore = true;
+    if (document.stems != nullptr)
+    {
+        auto stems = std::make_shared<StemSet> (*document.stems);
+        stems->mix = reversedMix;
+        for (auto& stem : stems->stems)
+        {
+            auto flipped = std::make_shared<SampleData> (*stem);
+            flipped->audio.reverse (0, flipped->audio.getNumSamples());
+            stem = flipped;
+        }
+        job->stems = stems;
+        job->source = document.source;
+    }
     auto& s = job->saved;
     s.bpm = document.bpm;
     s.timeSig = document.timeSig;
@@ -933,7 +1090,9 @@ void ChopLabProcessor::findLyrics()
         return;
     }
 
-    const auto sample = document.sample;
+    // The separated vocal transcribes far better than the full mix.
+    const auto sample = document.stems != nullptr ? document.stems->stems[stemVocals] : document.mix();
+    const auto* mix = document.mix().get();
     const int model = document.lyrics.model;
     const auto language = document.lyrics.requestedLanguage;
     lyricsProgress = 0.0f;
@@ -945,7 +1104,7 @@ void ChopLabProcessor::findLyrics()
     sendChangeMessage();
 
     lyricsPool.removeAllJobs (false, 0);
-    lyricsPool.addJob ([this, generation, sample, model, language]
+    lyricsPool.addJob ([this, generation, sample, mix, model, language]
     {
         auto stillWanted = [this, generation] (float f)
         {
@@ -955,7 +1114,7 @@ void ChopLabProcessor::findLyrics()
 
         auto out = std::make_unique<LyricsJobResult>();
         out->generation = generation;
-        out->sample = sample.get();
+        out->sample = mix;
 
         bool ready = true;
         if (! lyricsModelFile (model).existsAsFile())
@@ -1006,7 +1165,7 @@ void ChopLabProcessor::applyLyricsResult()
         lyricsMessage = r->result.error;
         lyricsPhase = LyricsStatus::failed;
     }
-    else if (r->sample == document.sample.get())
+    else if (r->sample == document.mix().get())
     {
         {
             const juce::ScopedLock sl (docLock);
@@ -1055,6 +1214,180 @@ void ChopLabProcessor::resetSliceLyrics (int index)
         s.lyricsEdited = false;
     }
     sendChangeMessage();
+}
+
+//==============================================================================
+ChopLabProcessor::StemsStatus ChopLabProcessor::getStemsStatus() const
+{
+    StemsStatus s;
+    s.phase = (StemsStatus::Phase) stemsPhase.load();
+    s.progress = stemsProgress.load();
+    {
+        const juce::ScopedLock sl (resultLock);
+        s.message = stemsMessage;
+    }
+    if (s.phase == StemsStatus::idle && document.stems != nullptr)
+        s.phase = StemsStatus::done;
+    return s;
+}
+
+void ChopLabProcessor::separateStems()
+{
+    if (! document.hasSample() || analysing || document.stems != nullptr)
+        return;
+
+    const int generation = ++stemsGeneration;
+    if (! stemsSupportedOnThisCpu())
+    {
+        const juce::ScopedLock sl (resultLock);
+        stemsMessage = "Stems need a CPU with AVX2 (Intel 2013+ / AMD 2015+)";
+        stemsPhase = StemsStatus::failed;
+        sendChangeMessage();
+        return;
+    }
+
+    const auto mix = document.mix();
+    const bool reversed = document.reversed;
+    const auto folder = getDragFolder().getChildFile ("Stems");
+    stemsProgress = 0.0f;
+    stemsPhase = stemsModelLooksComplete() ? StemsStatus::separating : StemsStatus::downloading;
+    {
+        const juce::ScopedLock sl (resultLock);
+        stemsMessage = {};
+    }
+    sendChangeMessage();
+
+    stemsPool.removeAllJobs (false, 0);
+    stemsPool.addJob ([this, generation, mix, reversed, folder]
+    {
+        auto stillWanted = [this, generation] (float f)
+        {
+            stemsProgress = f;
+            return stemsGeneration.load() == generation;
+        };
+
+        auto out = std::make_unique<StemsJobResult>();
+        out->generation = generation;
+        out->mix = mix.get();
+
+        bool ready = true;
+        if (! stemsModelLooksComplete())
+        {
+            stemsPhase = StemsStatus::downloading;
+            ready = downloadStemsModel (stillWanted, out->error);
+            out->cancelled = stemsGeneration.load() != generation;
+        }
+        if (ready)
+        {
+            stemsPhase = StemsStatus::separating;
+            stemsProgress = 0.0f;
+            // The model only knows music played forwards, so a reversed sample is separated the right way round.
+            auto result = reversed ? choplab::separateStems (forwards (*mix, true), mix->sampleRate, stillWanted)
+                                   : choplab::separateStems (mix->audio, mix->sampleRate, stillWanted);
+            if (result.cancelled)
+                out->cancelled = true;
+            else if (result.error.isNotEmpty())
+                out->error = result.error;
+            else
+                out->stems = makeStemSet (result, mix, reversed, folder);
+        }
+
+        {
+            const juce::ScopedLock sl (resultLock);
+            pendingStems = std::move (out);
+        }
+        triggerAsyncUpdate();
+    });
+}
+
+void ChopLabProcessor::cancelStems()
+{
+    ++stemsGeneration;
+    stemsPhase = StemsStatus::idle;
+    sendChangeMessage();
+}
+
+void ChopLabProcessor::applyStemsResult()
+{
+    std::unique_ptr<StemsJobResult> r;
+    {
+        const juce::ScopedLock sl (resultLock);
+        r = std::move (pendingStems);
+    }
+    if (r == nullptr || r->generation != stemsGeneration.load())
+        return;
+
+    if (r->cancelled)
+    {
+        stemsPhase = StemsStatus::idle;
+    }
+    else if (r->error.isNotEmpty())
+    {
+        const juce::ScopedLock sl (resultLock);
+        stemsMessage = r->error;
+        stemsPhase = StemsStatus::failed;
+    }
+    else if (r->mix == document.mix().get() && document.stems == nullptr && r->stems != nullptr)
+    {
+        {
+            const juce::ScopedLock sl (docLock);
+            document.stems = r->stems; // the mix keeps playing until a stem is picked
+        }
+        const juce::ScopedLock sl (resultLock);
+        stemsMessage = {};
+        stemsPhase = StemsStatus::done;
+    }
+    sendChangeMessage();
+}
+
+void ChopLabProcessor::setSource (int source)
+{
+    source = juce::jlimit (-1, kNumStems - 1, source);
+    if (document.stems == nullptr || analysing || source == document.source)
+        return;
+
+    // Same chops, tempo and lyrics; only the audio behind them changes.
+    auto job = std::make_unique<LoadJob>();
+    job->sample = document.stems->mix;
+    job->stems = document.stems;
+    job->source = source;
+    job->switchingSource = true;
+    job->restore = true;
+    job->saved = document;
+    job->tempo = document.detectedTempo;
+    job->grid = document.detectedGrid;
+    job->key = document.key;
+    startLoad (std::move (job));
+}
+
+void ChopLabProcessor::useSeparatedStems (StemsResult result)
+{
+    if (! document.hasSample() || document.stems != nullptr || analysing)
+        return;
+    ++stemsGeneration;
+    auto stems = makeStemSet (result, document.mix(), document.reversed, getDragFolder().getChildFile ("Stems"));
+    {
+        const juce::ScopedLock sl (docLock);
+        document.stems = stems;
+    }
+    stemsPhase = StemsStatus::idle;
+    sendChangeMessage();
+}
+
+juce::File ChopLabProcessor::stemFile (int stem) const
+{
+    if (document.stems == nullptr || stem < 0 || stem >= kNumStems)
+        return {};
+    const auto& stems = *document.stems;
+    if (stems.files[(size_t) stem].existsAsFile())
+        return stems.files[(size_t) stem];
+
+    // Deleted since, or couldn't be saved at the time: write it again.
+    auto file = stems.files[(size_t) stem];
+    if (file == juce::File())
+        file = getDragFolder().getChildFile ("Stems").getChildFile (legalName (stems.mix->name) + " - " + stemName (stem) + ".wav");
+    file.getParentDirectory().createDirectory();
+    return writeWav (forwards (*stems.stems[(size_t) stem], document.reversed), stems.mix->sampleRate, file, 32) ? file : juce::File();
 }
 
 //==============================================================================
@@ -1210,7 +1543,7 @@ juce::File ChopLabProcessor::getDragFolder() const
 {
     auto folder = juce::File::getSpecialLocation (juce::File::userDocumentsDirectory)
                       .getChildFile ("ChopLab")
-                      .getChildFile (document.sample != nullptr ? legalName (document.sample->name) : juce::String ("Untitled"));
+                      .getChildFile (document.hasSample() ? legalName (document.mix()->name) : juce::String ("Untitled"));
     folder.createDirectory();
     return folder;
 }
@@ -1282,16 +1615,18 @@ juce::File ChopLabProcessor::writeMidiPattern (const juce::File& folder) const
 std::shared_ptr<const ChopLabProcessor::EncodedAudio> ChopLabProcessor::encodedAudio() const
 {
     const juce::ScopedLock sl (encodedLock);
-    if (encodedFor == document.sample.get() && encodedCache != nullptr)
+    // Always the mix: stems are files next to the project, not part of it.
+    const auto mix = document.mix();
+    if (encodedFor == mix.get() && encodedCache != nullptr)
         return encodedCache;
 
-    encodedFor = document.sample.get();
+    encodedFor = mix.get();
     encodedCache = nullptr;
-    if (! document.hasSample() || document.sample->lengthSeconds() > kMaxEmbedSeconds)
+    if (! document.hasSample() || mix->lengthSeconds() > kMaxEmbedSeconds)
         return nullptr;
 
     auto encoded = std::make_shared<EncodedAudio>();
-    const auto& audio = document.sample->audio;
+    const auto& audio = mix->audio;
     const float peak = audio.getMagnitude (0, audio.getNumSamples());
     encoded->scale = peak > 1.0f ? 1.0f / peak : 1.0f;
 
@@ -1302,7 +1637,7 @@ std::shared_ptr<const ChopLabProcessor::EncodedAudio> ChopLabProcessor::encodedA
     juce::FlacAudioFormat flac;
     {
         auto writer = flac.createWriterFor (stream, juce::AudioFormatWriterOptions {}
-                                                        .withSampleRate (document.sample->sampleRate)
+                                                        .withSampleRate (mix->sampleRate)
                                                         .withNumChannels (audio.getNumChannels())
                                                         .withBitsPerSample (24));
         if (writer == nullptr || ! writer->writeFromAudioSampleBuffer (scaled, 0, scaled.getNumSamples()))
@@ -1320,8 +1655,8 @@ juce::ValueTree ChopLabProcessor::toValueTree() const
 
     if (d.hasSample())
     {
-        t.setProperty ("file", d.sample->file.getFullPathName(), nullptr);
-        t.setProperty ("name", d.sample->name, nullptr);
+        t.setProperty ("file", d.mix()->file.getFullPathName(), nullptr);
+        t.setProperty ("name", d.mix()->name, nullptr);
         if (auto encoded = encodedAudio())
         {
             t.setProperty ("audio", juce::var (encoded->flac), nullptr);
@@ -1402,6 +1737,21 @@ juce::ValueTree ChopLabProcessor::toValueTree() const
         pattern.appendChild (nt, nullptr);
     }
     t.appendChild (pattern, nullptr);
+
+    if (d.stems != nullptr)
+    {
+        juce::ValueTree stems ("Stems");
+        stems.setProperty ("source", d.source, nullptr);
+        for (int i = 0; i < kNumStems; ++i)
+        {
+            juce::ValueTree st ("S");
+            st.setProperty ("kind", i, nullptr);
+            st.setProperty ("file", d.stems->files[(size_t) i].getFullPathName(), nullptr);
+            st.setProperty ("hash", d.stems->hashes[(size_t) i], nullptr);
+            stems.appendChild (st, nullptr);
+        }
+        t.appendChild (stems, nullptr);
+    }
     return t;
 }
 
@@ -1513,6 +1863,20 @@ void ChopLabProcessor::setStateInformation (const void* data, int size)
     {
         job->embedded = *block;
         job->embeddedScale = t.getProperty ("audioScale", 1.0f);
+    }
+    if (auto stems = t.getChildWithName ("Stems"); stems.isValid() && job->restore)
+    {
+        job->source = stems.getProperty ("source", -1);
+        for (const auto& st : stems)
+        {
+            const int kind = st.getProperty ("kind", -1);
+            const auto file = st.getProperty ("file", "").toString();
+            if (kind >= 0 && kind < kNumStems && juce::File::isAbsolutePath (file))
+            {
+                job->stemFiles[(size_t) kind] = juce::File (file);
+                job->stemHashes[(size_t) kind] = (juce::int64) st.getProperty ("hash", 0);
+            }
+        }
     }
 
     if (job->embedded.getSize() == 0 && path.isEmpty())

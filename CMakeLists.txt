@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(ChopLab VERSION 0.2.0 LANGUAGES C CXX)
+project(ChopLab VERSION 0.3.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -63,12 +63,53 @@ else()
     FetchContent_MakeAvailable(whisper)
 endif()
 
+# Stem separation: demucs.cpp (Demucs v4 in plain C++) on Eigen. Built for AVX2/FMA like whisper, in
+# its own library together with Source/Stems/Demucs.cpp, which is kept free of JUCE (see Demucs.h).
+if(EXISTS ${CHOPLAB_LIBS}/demucs.cpp/src/model.hpp)
+    set(DEMUCS_DIR ${CHOPLAB_LIBS}/demucs.cpp)
+else()
+    FetchContent_Declare(demucs_cpp
+        GIT_REPOSITORY https://github.com/sevagh/demucs.cpp.git
+        GIT_TAG f1206e9adeea103aef4a636b9e62297cf1f8e34e
+        GIT_SUBMODULES ""
+        SOURCE_SUBDIR do-not-add)
+    FetchContent_MakeAvailable(demucs_cpp)
+    set(DEMUCS_DIR ${demucs_cpp_SOURCE_DIR})
+endif()
+
+if(EXISTS ${CHOPLAB_LIBS}/eigen/Eigen/Dense)
+    set(EIGEN_DIR ${CHOPLAB_LIBS}/eigen)
+else()
+    FetchContent_Declare(eigen
+        GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
+        GIT_TAG 3.4.1
+        GIT_SHALLOW ON
+        SOURCE_SUBDIR do-not-add)
+    FetchContent_MakeAvailable(eigen)
+    set(EIGEN_DIR ${eigen_SOURCE_DIR})
+endif()
+
+file(GLOB DEMUCS_SOURCES ${DEMUCS_DIR}/src/*.cpp)
+add_library(choplab_demucs STATIC Source/Stems/Demucs.cpp ${DEMUCS_SOURCES})
+target_include_directories(choplab_demucs PRIVATE ${DEMUCS_DIR}/src)
+target_include_directories(choplab_demucs SYSTEM PRIVATE ${EIGEN_DIR})
+target_compile_definitions(choplab_demucs PRIVATE EIGEN_MPL2_ONLY)
+if(MSVC)
+    target_compile_options(choplab_demucs PRIVATE /arch:AVX2 /bigobj)
+    set_source_files_properties(${DEMUCS_SOURCES} PROPERTIES COMPILE_OPTIONS "/W0")
+else()
+    target_compile_options(choplab_demucs PRIVATE -mavx2 -mfma)
+    set_source_files_properties(${DEMUCS_SOURCES} PROPERTIES COMPILE_OPTIONS "-w")
+endif()
+
 set(CHOPLAB_CORE_SOURCES
     Source/Analysis/Analysis.cpp
     Source/Engine/Chopper.cpp
     Source/Engine/Renderer.cpp
     Source/Engine/Pattern.cpp
     Source/Lyrics/Lyrics.cpp
+    Source/Common/Download.cpp
+    Source/Stems/Stems.cpp
 )
 
 set(CHOPLAB_COMMON_DEFINITIONS
@@ -82,11 +123,12 @@ set(CHOPLAB_COMMON_DEFINITIONS
 
 if(CHOPLAB_BUILD_TESTS)
     juce_add_console_app(ChopLabTests PRODUCT_NAME "ChopLabTests")
-    target_sources(ChopLabTests PRIVATE Tests/AnalysisTests.cpp Tests/LyricsTests.cpp ${CHOPLAB_CORE_SOURCES})
+    target_sources(ChopLabTests PRIVATE Tests/AnalysisTests.cpp Tests/LyricsTests.cpp Tests/StemsTests.cpp ${CHOPLAB_CORE_SOURCES})
     target_include_directories(ChopLabTests PRIVATE Source ${SIGNALSMITH_STRETCH_DIR}/.. ${SIGNALSMITH_LINEAR_PARENT})
     target_compile_definitions(ChopLabTests PRIVATE ${CHOPLAB_COMMON_DEFINITIONS} JUCE_STANDALONE_APPLICATION=1)
     target_link_libraries(ChopLabTests PRIVATE
         whisper
+        choplab_demucs
         juce::juce_audio_formats
         juce::juce_dsp
         juce::juce_gui_basics
@@ -118,6 +160,7 @@ target_sources(ChopLab PRIVATE
     Source/UI/SliceTable.cpp
     Source/UI/Panels.cpp
     Source/UI/LyricsCard.cpp
+    Source/UI/StemsCard.cpp
     Source/UI/PatternView.cpp)
 
 target_include_directories(ChopLab PRIVATE Source ${SIGNALSMITH_STRETCH_DIR}/.. ${SIGNALSMITH_LINEAR_PARENT})
@@ -130,6 +173,7 @@ endif()
 target_link_libraries(ChopLab
     PRIVATE
         whisper
+        choplab_demucs
         juce::juce_audio_utils
         juce::juce_audio_formats
         juce::juce_dsp
@@ -162,12 +206,14 @@ if(CHOPLAB_BUILD_TESTS)
         Source/UI/SliceTable.cpp
         Source/UI/Panels.cpp
         Source/UI/LyricsCard.cpp
+    Source/UI/StemsCard.cpp
         Source/UI/PatternView.cpp)
     target_include_directories(ChopLabEngineTests PRIVATE Source Tests ${SIGNALSMITH_STRETCH_DIR}/.. ${SIGNALSMITH_LINEAR_PARENT})
     target_compile_definitions(ChopLabEngineTests PRIVATE ${CHOPLAB_COMMON_DEFINITIONS}
         JUCE_STANDALONE_APPLICATION=1 JUCE_MODAL_LOOPS_PERMITTED=1 JucePlugin_Name="ChopLab")
     target_link_libraries(ChopLabEngineTests PRIVATE
         whisper
+        choplab_demucs
         juce::juce_audio_utils
         juce::juce_audio_formats
         juce::juce_dsp

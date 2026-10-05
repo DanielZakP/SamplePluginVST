@@ -8,6 +8,7 @@ namespace choplab
 
 // The "Lyrics" card: language and model choice, the Find lyrics button and progress.
 class LyricsCard : public juce::Component,
+                   public juce::SettableTooltipClient,
                    private juce::Timer
 {
 public:
