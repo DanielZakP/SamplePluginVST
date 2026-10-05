@@ -79,6 +79,7 @@ ChopLabProcessor::ChopLabProcessor()
 {
     for (auto& p : playPositions)
         p = -1;
+    combinedMidi.ensureSize (16384);
     startTimerHz (5);
 }
 
@@ -86,6 +87,8 @@ ChopLabProcessor::~ChopLabProcessor()
 {
     stopTimer();
     cancelPendingUpdate();
+    ++lyricsGeneration; // makes a running download or transcription stop at its next check
+    lyricsPool.removeAllJobs (true, 30000);
     loadPool.removeAllJobs (true, 10000);
 }
 
@@ -94,6 +97,7 @@ void ChopLabProcessor::prepareToPlay (double sampleRate, int)
 {
     currentRate = sampleRate;
     preparedRate = sampleRate;
+    combinedMidi.ensureSize (16384);
     for (auto& v : voices)
     {
         v.active = false;
@@ -148,8 +152,19 @@ void ChopLabProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
         previewFifo.finishedRead (size1 + size2);
     }
 
+    {
+        const juce::SpinLock::ScopedTryLockType sl (patternLock);
+        if (sl.isLocked() && publishedPattern != audioPattern)
+            audioPattern = publishedPattern;
+    }
+
+    // Host MIDI plus whatever the built-in pattern plays in this block, in time order.
+    combinedMidi.clear();
+    combinedMidi.addEvents (midi, 0, numSamples, 0);
+    addPatternEvents (numSamples);
+
     int pos = 0;
-    for (const auto meta : midi)
+    for (const auto meta : combinedMidi)
     {
         const int t = juce::jlimit (0, numSamples, meta.samplePosition);
         if (t > pos)
@@ -177,21 +192,72 @@ void ChopLabProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
         playPositions[reported] = -1;
 }
 
+void ChopLabProcessor::addPatternEvents (int numSamples)
+{
+    const bool playing = patternPlaying.load();
+    if (playing && ! patternWasPlaying)
+        patternBeat = 0.0;
+    if (! playing && patternWasPlaying)
+        for (auto& v : voices)
+            if (v.active && v.fromPattern)
+                releaseVoice (v, true);
+    patternWasPlaying = playing;
+
+    if (! playing || audioPattern == nullptr || audioData == nullptr || audioPattern->lengthBeats <= 0.0)
+        return;
+
+    const double beatsPerSample = hostBpm.load() / 60.0 / currentRate;
+    const double span = numSamples * beatsPerSample;
+
+    struct Event
+    {
+        double offset;
+        int note;
+        float velocity;
+        bool on;
+    };
+    std::array<Event, 512> events;
+    size_t count = 0;
+    const int root = audioData->rootNote;
+    const int numChops = (int) audioData->slices.size();
+    forEachPatternEvent (audioPattern->notes, audioPattern->lengthBeats, patternBeat, span, [&] (size_t index, double offset, bool on)
+    {
+        const auto& n = audioPattern->notes[index];
+        if (count < events.size() && n.chop >= 0 && n.chop < numChops && root + n.chop <= 127)
+            events[count++] = { offset, root + n.chop, n.velocity, on };
+    });
+    // Note-offs before note-ons at the same moment, so a repeated chop isn't cut by its own previous note.
+    std::sort (events.begin(), events.begin() + (std::ptrdiff_t) count,
+               [] (const Event& a, const Event& b) { return a.offset < b.offset || (! (b.offset < a.offset) && ! a.on && b.on); });
+    for (size_t i = 0; i < count; ++i)
+    {
+        const auto& e = events[i];
+        const int at = juce::jlimit (0, numSamples - 1, (int) (e.offset / beatsPerSample));
+        combinedMidi.addEvent (e.on ? juce::MidiMessage::noteOn (kPatternChannel, e.note, e.velocity)
+                                    : juce::MidiMessage::noteOff (kPatternChannel, e.note),
+                               at);
+    }
+
+    patternBeat = std::fmod (patternBeat + span, audioPattern->lengthBeats);
+    patternPosition = patternBeat;
+}
+
 void ChopLabProcessor::handleMidi (const juce::MidiMessage& m)
 {
+    const bool fromPattern = m.getChannel() == kPatternChannel;
     if (m.isNoteOn())
     {
         if (audioData != nullptr)
         {
             const int index = m.getNoteNumber() - audioData->rootNote;
             if (index >= 0 && index < (int) audioData->slices.size())
-                startVoice (index, m.getNoteNumber(), m.getFloatVelocity(), false);
+                startVoice (index, m.getNoteNumber(), m.getFloatVelocity(), false, fromPattern);
         }
     }
     else if (m.isNoteOff())
     {
         for (auto& v : voices)
-            if (v.active && ! v.preview && ! v.oneShot && ! v.releasing && v.note == m.getNoteNumber())
+            if (v.active && ! v.preview && ! v.oneShot && ! v.releasing && v.note == m.getNoteNumber() && v.fromPattern == fromPattern)
                 releaseVoice (v, false);
     }
     else if (m.isAllNotesOff() || m.isAllSoundOff())
@@ -202,7 +268,7 @@ void ChopLabProcessor::handleMidi (const juce::MidiMessage& m)
     }
 }
 
-void ChopLabProcessor::startVoice (int sliceIndex, int note, float velocity, bool preview)
+void ChopLabProcessor::startVoice (int sliceIndex, int note, float velocity, bool preview, bool fromPattern)
 {
     if (audioData == nullptr)
         return;
@@ -236,6 +302,7 @@ void ChopLabProcessor::startVoice (int sliceIndex, int note, float velocity, boo
     v.sliceIndex = sliceIndex;
     v.note = note;
     v.preview = preview;
+    v.fromPattern = fromPattern;
     v.oneShot = preview || audioData->oneShot;
     v.pos = 0.0;
     v.inc = audioData->sampleRate / currentRate;
@@ -346,6 +413,7 @@ void ChopLabProcessor::loadFile (const juce::File& file)
 
 void ChopLabProcessor::startLoad (std::unique_ptr<LoadJob> job)
 {
+    cancelLyrics(); // they'd belong to the old audio
     job->generation = ++loadGeneration;
     analysing = true;
     lastError = {};
@@ -426,6 +494,12 @@ void ChopLabProcessor::handleAsyncUpdate()
         const juce::ScopedLock sl (resultLock);
         result = std::move (pendingResult);
     }
+    applyLoadResult (std::move (result));
+    applyLyricsResult();
+}
+
+void ChopLabProcessor::applyLoadResult (std::unique_ptr<LoadResult> result)
+{
     if (result == nullptr || result->generation != loadGeneration)
         return;
 
@@ -456,6 +530,8 @@ void ChopLabProcessor::handleAsyncUpdate()
         d.global = s.global;
         d.chop = s.chop;
         d.slices = s.slices;
+        d.lyrics = s.lyrics;
+        d.pattern = s.pattern;
         std::vector<juce::int64> markers;
         for (const auto& slice : s.slices)
             markers.push_back (slice.start);
@@ -471,6 +547,9 @@ void ChopLabProcessor::handleAsyncUpdate()
         d.global.speed = 1.0f;
         d.global.gainDb = 0.0f;
         d.chop = document.chop;
+        d.lyrics.model = document.lyrics.model; // keep the lyrics preferences, not the words
+        d.lyrics.requestedLanguage = document.lyrics.requestedLanguage;
+        d.pattern.snapBeats = document.pattern.snapBeats;
         applyMarkers (d, markersFor (d));
     }
 
@@ -482,6 +561,7 @@ void ChopLabProcessor::handleAsyncUpdate()
     selectedSlice = document.slices.empty() ? -1 : 0;
     lastError = {};
     requestRender();
+    publishPattern();
     sendChangeMessage();
 }
 
@@ -638,12 +718,16 @@ void ChopLabProcessor::addMarker (juce::int64 position)
             added.end = s.end;
             added.settings = s.settings;
             added.settings.label = {};
+            added.settings.lyrics = {};
+            added.settings.lyricsEdited = false;
             s.end = position;
             s.info = {};
             slices.insert (slices.begin() + (std::ptrdiff_t) i + 1, added);
             describeSlices (document);
+            remapPatternForSplit (document.pattern, (int) i);
         }
         selectedSlice = (int) i + 1;
+        publishPattern();
         requestRender();
         sendChangeMessage();
         return;
@@ -662,9 +746,11 @@ void ChopLabProcessor::removeMarker (int index)
         slices[(size_t) index - 1].info = {};
         slices.erase (slices.begin() + index);
         describeSlices (document);
+        remapPatternForMerge (document.pattern, index);
     }
     if (selectedSlice >= index)
         selectedSlice = juce::jmax (0, selectedSlice - 1);
+    publishPattern();
     requestRender();
     sendChangeMessage();
 }
@@ -712,6 +798,13 @@ void ChopLabProcessor::setReversed (bool shouldBeReversed)
     s.reversed = shouldBeReversed;
     s.global = document.global;
     s.chop = document.chop;
+    // Reversed speech has no words; keep the preferences so Find lyrics is one click away.
+    s.lyrics.model = document.lyrics.model;
+    s.lyrics.requestedLanguage = document.lyrics.requestedLanguage;
+    // Chop n becomes chop (count - 1 - n), so the pattern keeps playing the same audio.
+    s.pattern = document.pattern;
+    for (auto& n : s.pattern.notes)
+        n.chop = (int) document.slices.size() - 1 - n.chop;
 
     const double lengthSeconds = document.sample->lengthSeconds();
     const double barSeconds = document.timeSig.quarterBeatsPerBar() * 60.0 / document.bpm;
@@ -735,7 +828,8 @@ void ChopLabProcessor::setReversed (bool shouldBeReversed)
 //==============================================================================
 ChopLabProcessor::Snapshot ChopLabProcessor::snapshot() const
 {
-    return { document.slices, document.bpm, document.downbeatSeconds, document.timeSig, document.meterIsAuto, document.chop, document.global, selectedSlice };
+    return { document.slices, document.bpm,    document.downbeatSeconds, document.timeSig, document.meterIsAuto,
+             document.chop,   document.global, document.pattern,         selectedSlice };
 }
 
 void ChopLabProcessor::restore (const Snapshot& s)
@@ -749,9 +843,11 @@ void ChopLabProcessor::restore (const Snapshot& s)
         document.meterIsAuto = s.meterIsAuto;
         document.chop = s.chop;
         document.global = s.global;
+        document.pattern = s.pattern;
     }
     selectedSlice = juce::jlimit (-1, (int) document.slices.size() - 1, s.selected);
     lastEditKind = 0;
+    publishPattern();
     requestRender();
     sendChangeMessage();
 }
@@ -805,6 +901,222 @@ void ChopLabProcessor::selectSlice (int index)
 {
     selectedSlice = juce::jlimit (-1, (int) document.slices.size() - 1, index);
     sendChangeMessage();
+}
+
+//==============================================================================
+ChopLabProcessor::LyricsStatus ChopLabProcessor::getLyricsStatus() const
+{
+    LyricsStatus s;
+    s.phase = (LyricsStatus::Phase) lyricsPhase.load();
+    s.progress = lyricsProgress.load();
+    {
+        const juce::ScopedLock sl (resultLock);
+        s.message = lyricsMessage;
+    }
+    if (s.phase == LyricsStatus::idle && document.lyrics.searched)
+        s.phase = LyricsStatus::done;
+    return s;
+}
+
+void ChopLabProcessor::findLyrics()
+{
+    if (! document.hasSample() || analysing)
+        return;
+
+    const int generation = ++lyricsGeneration;
+    if (! lyricsSupportedOnThisCpu())
+    {
+        const juce::ScopedLock sl (resultLock);
+        lyricsMessage = "Lyrics need a CPU with AVX2 (Intel 2013+ / AMD 2015+)";
+        lyricsPhase = LyricsStatus::failed;
+        sendChangeMessage();
+        return;
+    }
+
+    const auto sample = document.sample;
+    const int model = document.lyrics.model;
+    const auto language = document.lyrics.requestedLanguage;
+    lyricsProgress = 0.0f;
+    lyricsPhase = lyricsModelFile (model).existsAsFile() ? LyricsStatus::transcribing : LyricsStatus::downloading;
+    {
+        const juce::ScopedLock sl (resultLock);
+        lyricsMessage = {};
+    }
+    sendChangeMessage();
+
+    lyricsPool.removeAllJobs (false, 0);
+    lyricsPool.addJob ([this, generation, sample, model, language]
+    {
+        auto stillWanted = [this, generation] (float f)
+        {
+            lyricsProgress = f;
+            return lyricsGeneration.load() == generation;
+        };
+
+        auto out = std::make_unique<LyricsJobResult>();
+        out->generation = generation;
+        out->sample = sample.get();
+
+        bool ready = true;
+        if (! lyricsModelFile (model).existsAsFile())
+        {
+            lyricsPhase = LyricsStatus::downloading;
+            ready = downloadLyricsModel (model, stillWanted, out->result.error);
+            out->result.cancelled = lyricsGeneration.load() != generation;
+        }
+        if (ready)
+        {
+            lyricsPhase = LyricsStatus::transcribing;
+            lyricsProgress = 0.0f;
+            out->result = transcribeLyrics (sample->audio, sample->sampleRate, model, language, stillWanted);
+        }
+
+        {
+            const juce::ScopedLock sl (resultLock);
+            pendingLyrics = std::move (out);
+        }
+        triggerAsyncUpdate();
+    });
+}
+
+void ChopLabProcessor::cancelLyrics()
+{
+    ++lyricsGeneration;
+    lyricsPhase = LyricsStatus::idle;
+    sendChangeMessage();
+}
+
+void ChopLabProcessor::applyLyricsResult()
+{
+    std::unique_ptr<LyricsJobResult> r;
+    {
+        const juce::ScopedLock sl (resultLock);
+        r = std::move (pendingLyrics);
+    }
+    if (r == nullptr || r->generation != lyricsGeneration.load())
+        return;
+
+    if (r->result.cancelled)
+    {
+        lyricsPhase = LyricsStatus::idle;
+    }
+    else if (r->result.error.isNotEmpty())
+    {
+        const juce::ScopedLock sl (resultLock);
+        lyricsMessage = r->result.error;
+        lyricsPhase = LyricsStatus::failed;
+    }
+    else if (r->sample == document.sample.get())
+    {
+        {
+            const juce::ScopedLock sl (docLock);
+            document.lyrics.words = std::move (r->result.words);
+            document.lyrics.language = r->result.language;
+            document.lyrics.searched = true;
+        }
+        const juce::ScopedLock sl (resultLock);
+        lyricsMessage = {};
+        lyricsPhase = LyricsStatus::done;
+    }
+    sendChangeMessage();
+}
+
+void ChopLabProcessor::setLyricsOptions (int model, const juce::String& requestedLanguage)
+{
+    const juce::ScopedLock sl (docLock);
+    document.lyrics.model = juce::jlimit (0, (int) lyricsModels().size() - 1, model);
+    document.lyrics.requestedLanguage = requestedLanguage;
+    sendChangeMessage();
+}
+
+void ChopLabProcessor::setSliceLyrics (int index, const juce::String& text)
+{
+    if (index < 0 || index >= (int) document.slices.size() || text == document.lyricsFor (index))
+        return;
+    checkpoint (EditKind::slice, index);
+    {
+        const juce::ScopedLock sl (docLock);
+        auto& s = document.slices[(size_t) index].settings;
+        s.lyrics = text.trim();
+        s.lyricsEdited = true;
+    }
+    sendChangeMessage();
+}
+
+void ChopLabProcessor::resetSliceLyrics (int index)
+{
+    if (index < 0 || index >= (int) document.slices.size() || ! document.slices[(size_t) index].settings.lyricsEdited)
+        return;
+    checkpoint (EditKind::slice, index);
+    {
+        const juce::ScopedLock sl (docLock);
+        auto& s = document.slices[(size_t) index].settings;
+        s.lyrics = {};
+        s.lyricsEdited = false;
+    }
+    sendChangeMessage();
+}
+
+//==============================================================================
+void ChopLabProcessor::setPattern (const Pattern& p, bool newEdit)
+{
+    if (newEdit)
+        lastEditKind = 0;
+    checkpoint (EditKind::pattern);
+    {
+        const juce::ScopedLock sl (docLock);
+        document.pattern = p;
+        document.pattern.lengthBeats = juce::jlimit (1.0, 4096.0, p.lengthBeats);
+    }
+    publishPattern();
+    sendChangeMessage();
+}
+
+void ChopLabProcessor::fillPatternFromSample()
+{
+    auto p = patternFromSampleOrder (document);
+    p.snapBeats = document.pattern.snapBeats;
+    setPattern (p, true);
+}
+
+void ChopLabProcessor::playPattern (bool shouldPlay)
+{
+    patternPlaying = shouldPlay;
+    if (! shouldPlay)
+        patternPosition = 0.0;
+    sendChangeMessage();
+}
+
+void ChopLabProcessor::publishPattern()
+{
+    PatternData::Ptr data = new PatternData();
+    data->notes = document.pattern.notes;
+    data->lengthBeats = document.pattern.lengthBeats;
+
+    PatternData::Ptr old;
+    {
+        const juce::SpinLock::ScopedLockType sl (patternLock);
+        old = publishedPattern;
+        publishedPattern = data;
+    }
+    if (old != nullptr)
+    {
+        const juce::ScopedLock sl (retiredLock);
+        retiredPatterns.add (old);
+    }
+}
+
+juce::File ChopLabProcessor::writePatternMidi (const juce::File& folder) const
+{
+    if (! document.hasSample() || document.pattern.notes.empty())
+        return {};
+    const auto midi = patternToMidi (document.pattern, document.global.rootNote, getHostBpm(), document.timeSig, (int) document.slices.size());
+    const auto file = folder.getChildFile (legalName (document.sample->name) + " - piano roll.mid");
+    file.deleteFile();
+    juce::FileOutputStream out (file);
+    if (! out.openedOk() || ! midi.writeTo (out))
+        return {};
+    return file;
 }
 
 //==============================================================================
@@ -877,6 +1189,9 @@ void ChopLabProcessor::releaseRetired()
     for (int i = retired.size(); --i >= 0;)
         if (retired.getObjectPointerUnchecked (i)->getReferenceCount() == 1)
             retired.remove (i);
+    for (int i = retiredPatterns.size(); --i >= 0;)
+        if (retiredPatterns.getObjectPointerUnchecked (i)->getReferenceCount() == 1)
+            retiredPatterns.remove (i);
 }
 
 void ChopLabProcessor::timerCallback()
@@ -953,39 +1268,8 @@ juce::File ChopLabProcessor::writeMidiPattern (const juce::File& folder) const
 {
     if (! document.hasSample() || document.slices.empty())
         return {};
-
-    constexpr int ppq = 960;
-    const double bpm = document.bpm;
-    const double barBeats = document.timeSig.quarterBeatsPerBar();
-
-    // Shift so bar 1 of the sample lands on a bar line in the piano roll.
-    const double downbeatBeats = document.downbeatSeconds * bpm / 60.0;
-    const double shift = downbeatBeats > 1.0e-6 ? std::ceil (downbeatBeats / barBeats - 1.0e-6) * barBeats - downbeatBeats : 0.0;
-
-    juce::MidiMessageSequence track;
-    track.addEvent (juce::MidiMessage::tempoMetaEvent ((int) std::llround (60000000.0 / bpm)), 0);
-    const int den = document.timeSig.denominator;
-    track.addEvent (juce::MidiMessage::timeSignatureMetaEvent (document.timeSig.numerator, den), 0);
-
-    for (int i = 0; i < (int) document.slices.size(); ++i)
-    {
-        const int note = document.noteForSlice (i);
-        if (note < 0)
-            continue;
-        const auto& s = document.slices[(size_t) i];
-        const double startBeat = document.secondsAt (s.start) * bpm / 60.0 + shift;
-        const double lengthBeats = document.lengthInBeats (s) / juce::jmax (0.01, (double) s.settings.speed * document.global.speed);
-        const double t0 = std::round (startBeat * ppq);
-        const double t1 = juce::jmax (t0 + 1.0, std::round ((startBeat + lengthBeats) * ppq) - 1.0);
-        track.addEvent (juce::MidiMessage::noteOn (1, note, (juce::uint8) 100), t0);
-        track.addEvent (juce::MidiMessage::noteOff (1, note), t1);
-    }
-    track.updateMatchedPairs();
-
-    juce::MidiFile midi;
-    midi.setTicksPerQuarterNote (ppq);
-    midi.addTrack (track);
-
+    const auto midi = patternToMidi (patternFromSampleOrder (document), document.global.rootNote, document.bpm, document.timeSig,
+                                     (int) document.slices.size());
     const auto file = folder.getChildFile (legalName (document.sample->name) + " - chop pattern.mid");
     file.deleteFile();
     juce::FileOutputStream out (file);
@@ -1084,9 +1368,40 @@ juce::ValueTree ChopLabProcessor::toValueTree() const
         st.setProperty ("gain", s.settings.gainDb, nullptr);
         st.setProperty ("attack", s.settings.attackMs, nullptr);
         st.setProperty ("release", s.settings.releaseMs, nullptr);
+        if (s.settings.lyricsEdited)
+            st.setProperty ("lyrics", s.settings.lyrics, nullptr);
         slices.appendChild (st, nullptr);
     }
     t.appendChild (slices, nullptr);
+
+    juce::ValueTree lyrics ("Lyrics");
+    lyrics.setProperty ("language", d.lyrics.language, nullptr);
+    lyrics.setProperty ("requested", d.lyrics.requestedLanguage, nullptr);
+    lyrics.setProperty ("model", d.lyrics.model, nullptr);
+    lyrics.setProperty ("searched", d.lyrics.searched, nullptr);
+    for (const auto& w : d.lyrics.words)
+    {
+        juce::ValueTree wt ("W");
+        wt.setProperty ("t", w.text, nullptr);
+        wt.setProperty ("s", w.start, nullptr);
+        wt.setProperty ("e", w.end, nullptr);
+        lyrics.appendChild (wt, nullptr);
+    }
+    t.appendChild (lyrics, nullptr);
+
+    juce::ValueTree pattern ("Pattern");
+    pattern.setProperty ("length", d.pattern.lengthBeats, nullptr);
+    pattern.setProperty ("snap", d.pattern.snapBeats, nullptr);
+    for (const auto& n : d.pattern.notes)
+    {
+        juce::ValueTree nt ("N");
+        nt.setProperty ("c", n.chop, nullptr);
+        nt.setProperty ("s", n.start, nullptr);
+        nt.setProperty ("l", n.length, nullptr);
+        nt.setProperty ("v", n.velocity, nullptr);
+        pattern.appendChild (nt, nullptr);
+    }
+    t.appendChild (pattern, nullptr);
     return t;
 }
 
@@ -1133,7 +1448,30 @@ void ChopLabProcessor::readSettings (const juce::ValueTree& t, Document& d)
         s.settings.gainDb = st.getProperty ("gain", 0.0f);
         s.settings.attackMs = st.getProperty ("attack", 0.0f);
         s.settings.releaseMs = st.getProperty ("release", 15.0f);
+        s.settings.lyricsEdited = st.hasProperty ("lyrics");
+        s.settings.lyrics = st.getProperty ("lyrics", "").toString();
         d.slices.push_back (s);
+    }
+
+    d.lyrics = {};
+    if (auto l = t.getChildWithName ("Lyrics"); l.isValid())
+    {
+        d.lyrics.language = l.getProperty ("language", "").toString();
+        d.lyrics.requestedLanguage = l.getProperty ("requested", "").toString();
+        d.lyrics.model = juce::jlimit (0, (int) lyricsModels().size() - 1, (int) l.getProperty ("model", 0));
+        d.lyrics.searched = l.getProperty ("searched", false);
+        for (const auto& wt : l)
+            d.lyrics.words.push_back ({ wt.getProperty ("t", "").toString(), wt.getProperty ("s", 0.0), wt.getProperty ("e", 0.0), 1.0f });
+    }
+
+    d.pattern = {};
+    if (auto p = t.getChildWithName ("Pattern"); p.isValid())
+    {
+        d.pattern.lengthBeats = juce::jlimit (1.0, 4096.0, (double) p.getProperty ("length", 16.0));
+        d.pattern.snapBeats = p.getProperty ("snap", 0.25);
+        for (const auto& nt : p)
+            d.pattern.notes.push_back ({ nt.getProperty ("c", 0), nt.getProperty ("s", 0.0), juce::jmax (1.0 / 64.0, (double) nt.getProperty ("l", 1.0)),
+                                         juce::jlimit (0.0f, 1.0f, (float) nt.getProperty ("v", 0.8f)) });
     }
 }
 
@@ -1163,6 +1501,8 @@ void ChopLabProcessor::setStateInformation (const void* data, int size)
         const juce::ScopedLock sl (docLock);
         document.global = job->saved.global;
         document.chop = job->saved.chop;
+        document.lyrics.model = job->saved.lyrics.model;
+        document.lyrics.requestedLanguage = job->saved.lyrics.requestedLanguage;
     }
 
     const auto path = t.getProperty ("file", "").toString();

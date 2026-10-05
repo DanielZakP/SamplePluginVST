@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Analysis/Analysis.h"
+#include "Lyrics/Lyrics.h"
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <memory>
 #include <vector>
@@ -26,6 +27,8 @@ struct SliceSettings
     float gainDb = 0.0f;
     float attackMs = 0.0f;
     float releaseMs = 15.0f;
+    juce::String lyrics;       // only used when lyricsEdited; otherwise the detected words are shown
+    bool lyricsEdited = false;
 };
 
 struct Slice
@@ -55,6 +58,33 @@ struct ChopSettings
     float sensitivity = 0.5f;  // 0..1
     double gridBeats = 1.0;    // grid chop size in quarter notes; 0 = one bar
     float minLengthMs = 70.0f; // transient chops closer than this are merged
+};
+
+struct LyricsState
+{
+    std::vector<LyricWord> words;
+    juce::String language;          // code of the language that was transcribed, e.g. "en"
+    juce::String requestedLanguage; // empty = detect automatically
+    int model = 0;                  // index into lyricsModels()
+    bool searched = false;          // transcription has run on this sample
+};
+
+// A note in the built-in piano roll. Times are in quarter-note beats from the pattern start.
+struct PatternNote
+{
+    int chop = 0;
+    double start = 0.0;
+    double length = 1.0;
+    float velocity = 0.8f;
+
+    double end() const { return start + length; }
+};
+
+struct Pattern
+{
+    double lengthBeats = 16.0;
+    double snapBeats = 0.25;
+    std::vector<PatternNote> notes;
 };
 
 // The loaded audio. Immutable once created, shared with the render thread.
@@ -88,6 +118,8 @@ struct Document
     std::vector<Slice> slices;
     GlobalSettings global;
     ChopSettings chop;
+    LyricsState lyrics;
+    Pattern pattern;
 
     bool hasSample() const { return sample != nullptr && sample->audio.getNumSamples() > 0; }
     juce::int64 length() const { return sample != nullptr ? sample->audio.getNumSamples() : 0; }
@@ -95,6 +127,17 @@ struct Document
     double secondsAt (juce::int64 pos) const { return (double) pos / sampleRate(); }
     GridPosition gridPosition (juce::int64 pos) const { return gridPositionAt (secondsAt (pos), bpm, downbeatSeconds, timeSig); }
     double lengthInBeats (const Slice& s) const { return secondsAt (s.end - s.start) * bpm / 60.0; }
+    // What a chop says: the user's edit if there is one, otherwise the detected words inside it.
+    juce::String lyricsFor (int index) const
+    {
+        if (index < 0 || index >= (int) slices.size())
+            return {};
+        const auto& s = slices[(size_t) index];
+        if (s.settings.lyricsEdited)
+            return s.settings.lyrics;
+        return wordsBetween (lyrics.words, secondsAt (s.start), secondsAt (s.end));
+    }
+
     int noteForSlice (int index) const
     {
         const int n = global.rootNote + index;

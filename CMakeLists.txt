@@ -67,6 +67,7 @@ set(CHOPLAB_CORE_SOURCES
     Source/Analysis/Analysis.cpp
     Source/Engine/Chopper.cpp
     Source/Engine/Renderer.cpp
+    Source/Engine/Pattern.cpp
     Source/Lyrics/Lyrics.cpp
 )
 
@@ -144,5 +145,27 @@ if(CHOPLAB_BUILD_TESTS)
         juce::juce_audio_processors
         juce::juce_audio_formats
         juce::juce_gui_basics
+        juce::juce_recommended_config_flags)
+endif()
+
+if(CHOPLAB_BUILD_TESTS)
+    # The plugin's own sources in a console app, so tests can drive the processor directly.
+    juce_add_console_app(ChopLabEngineTests PRODUCT_NAME "ChopLabEngineTests")
+    target_sources(ChopLabEngineTests PRIVATE
+        Tests/EngineTests.cpp
+        ${CHOPLAB_CORE_SOURCES}
+        Source/PluginProcessor.cpp
+        Source/PluginEditor.cpp
+        Source/UI/WaveformView.cpp
+        Source/UI/SliceTable.cpp
+        Source/UI/Panels.cpp)
+    target_include_directories(ChopLabEngineTests PRIVATE Source Tests ${SIGNALSMITH_STRETCH_DIR}/.. ${SIGNALSMITH_LINEAR_PARENT})
+    target_compile_definitions(ChopLabEngineTests PRIVATE ${CHOPLAB_COMMON_DEFINITIONS}
+        JUCE_STANDALONE_APPLICATION=1 JUCE_MODAL_LOOPS_PERMITTED=1 JucePlugin_Name="ChopLab")
+    target_link_libraries(ChopLabEngineTests PRIVATE
+        whisper
+        juce::juce_audio_utils
+        juce::juce_audio_formats
+        juce::juce_dsp
         juce::juce_recommended_config_flags)
 endif()

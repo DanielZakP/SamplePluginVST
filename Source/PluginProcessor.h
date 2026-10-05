@@ -2,7 +2,9 @@
 
 #include "Engine/Chopper.h"
 #include "Engine/Model.h"
+#include "Engine/Pattern.h"
 #include "Engine/Renderer.h"
+#include "Lyrics/Lyrics.h"
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_events/juce_events.h>
@@ -78,6 +80,38 @@ public:
     void previewFull();
     void stopPreview();
 
+    // Lyrics: runs in the background (downloading the model first if needed).
+    struct LyricsStatus
+    {
+        enum Phase
+        {
+            idle,
+            downloading,
+            transcribing,
+            done,
+            failed
+        };
+        Phase phase = idle;
+        float progress = 0.0f;
+        juce::String message;
+    };
+    LyricsStatus getLyricsStatus() const;
+    void findLyrics();
+    void cancelLyrics();
+    void setLyricsOptions (int model, const juce::String& requestedLanguage);
+    void setSliceLyrics (int index, const juce::String& text);
+    void resetSliceLyrics (int index);
+
+    // Built-in piano roll
+    // newEdit = start of a separate undo step; pass false while dragging so the drag is one step.
+    void setPattern (const choplab::Pattern&, bool newEdit = true);
+    void fillPatternFromSample();
+    void playPattern (bool shouldPlay);
+    bool isPatternPlaying() const { return patternPlaying.load(); }
+    double getPatternPosition() const { return patternPosition.load(); }
+    juce::File writePatternMidi (const juce::File& folder) const;
+    int currentPage = 0; // editor page: 0 = chops, 1 = pattern
+
     double getHostBpm() const { return hostBpm.load(); }
     void getPlayingPositions (std::vector<juce::int64>&) const;
 
@@ -96,6 +130,8 @@ private:
     void startLoad (std::unique_ptr<LoadJob>);
     static std::unique_ptr<LoadResult> runLoad (const LoadJob&);
     void handleAsyncUpdate() override;
+    void applyLoadResult (std::unique_ptr<LoadResult>);
+    void applyLyricsResult();
     void timerCallback() override;
 
     std::vector<juce::int64> markersFor (const choplab::Document&) const;
@@ -114,11 +150,12 @@ private:
         bool meterIsAuto = true;
         choplab::ChopSettings chop;
         choplab::GlobalSettings global;
+        choplab::Pattern pattern;
         int selected = -1;
     };
     enum class EditKind
     {
-        tempo = 1, timeSig, downbeat, chop, marker, addMarker, removeMarker, global, slice = 1000
+        tempo = 1, timeSig, downbeat, chop, marker, addMarker, removeMarker, global, pattern, slice = 1000
     };
     Snapshot snapshot() const;
     void restore (const Snapshot&);
@@ -148,6 +185,19 @@ private:
     juce::CriticalSection resultLock;
     std::unique_ptr<LoadResult> pendingResult;
 
+    struct LyricsJobResult
+    {
+        int generation = 0;
+        const choplab::SampleData* sample = nullptr;
+        choplab::LyricsResult result;
+    };
+    juce::ThreadPool lyricsPool { 1 };
+    std::atomic<int> lyricsGeneration { 0 };
+    std::atomic<int> lyricsPhase { LyricsStatus::idle };
+    std::atomic<float> lyricsProgress { 0.0f };
+    juce::String lyricsMessage; // guarded by resultLock
+    std::unique_ptr<LyricsJobResult> pendingLyrics;
+
     mutable juce::CriticalSection encodedLock;
     mutable std::shared_ptr<const EncodedAudio> encodedCache;
     mutable const choplab::SampleData* encodedFor = nullptr;
@@ -166,11 +216,14 @@ private:
         float gain = 1.0f, env = 0.0f, attackStep = 1.0f, releaseStep = 0.0f;
         bool releasing = false;
         bool active = false;
+        bool fromPattern = false;
         juce::uint32 age = 0;
     };
 
     void handleMidi (const juce::MidiMessage&);
-    void startVoice (int sliceIndex, int note, float velocity, bool preview);
+    void startVoice (int sliceIndex, int note, float velocity, bool preview, bool fromPattern = false);
+    void addPatternEvents (int numSamples);
+    void publishPattern();
     void releaseVoice (Voice&, bool fast);
     void renderVoices (juce::AudioBuffer<float>&, int start, int num);
 
@@ -193,6 +246,23 @@ private:
     std::atomic<double> preparedRate { 0.0 };
     double renderedRate = 0.0;
     std::array<std::atomic<juce::int64>, 16> playPositions;
+
+    // Pattern playback: the message thread publishes note lists, the audio thread plays them.
+    struct PatternData : juce::ReferenceCountedObject
+    {
+        using Ptr = juce::ReferenceCountedObjectPtr<PatternData>;
+        std::vector<choplab::PatternNote> notes;
+        double lengthBeats = 16.0;
+    };
+    juce::SpinLock patternLock;
+    PatternData::Ptr publishedPattern, audioPattern;
+    juce::ReferenceCountedArray<PatternData> retiredPatterns; // guarded by retiredLock
+    std::atomic<bool> patternPlaying { false };
+    bool patternWasPlaying = false;
+    double patternBeat = 0.0;
+    std::atomic<double> patternPosition { 0.0 };
+    juce::MidiBuffer combinedMidi;
+    static constexpr int kPatternChannel = 16;
 
     choplab::RenderThread renderThread { [this] (choplab::PlaybackData::Ptr d) { publish (d); } };
 
