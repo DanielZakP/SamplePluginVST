@@ -256,8 +256,22 @@ void analyseFile (const juce::File& file)
 }
 } // namespace
 
+int downloadModelCommand (int model);
+int printLyricsCommand (const juce::File& file, const juce::String& lang, int model);
+int lyricsTestCommand (const juce::File& fixtures, int model);
+
 int main (int argc, char** argv)
 {
+    const juce::String command = argc > 1 ? juce::String (argv[1]) : juce::String();
+    auto arg = [&] (int i) { return i < argc ? juce::String (argv[i]) : juce::String(); };
+    auto cwdFile = [] (const juce::String& p) { return juce::File::getCurrentWorkingDirectory().getChildFile (p); };
+    if (command == "--download-model")
+        return downloadModelCommand (arg (2).getIntValue());
+    if (command == "--lyrics-test")
+        return lyricsTestCommand (cwdFile (arg (2)), arg (3).getIntValue());
+    if (command == "--lyrics")
+        return printLyricsCommand (cwdFile (arg (2)), arg (3), arg (4).getIntValue());
+
     if (argc > 2 && juce::String (argv[1]) == "--write-demo")
     {
         // 4-bar A minor groove at 90 BPM, for trying the plugin out

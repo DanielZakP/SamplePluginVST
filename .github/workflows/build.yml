@@ -6,6 +6,40 @@ on:
   workflow_dispatch:
 
 jobs:
+  lyrics-linux:
+    name: Lyrics engine (Linux, quick check)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ninja-build libasound2-dev libfreetype-dev libfontconfig1-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxext-dev libgl1-mesa-dev
+
+      - name: Cache speech model
+        uses: actions/cache@v4
+        with:
+          path: ~/.config/ChopLab/Models
+          key: whisper-ggml-base-q5_1
+
+      - name: Download speech model
+        run: |
+          mkdir -p ~/.config/ChopLab/Models
+          test -f ~/.config/ChopLab/Models/ggml-base-q5_1.bin || curl -L --fail -o ~/.config/ChopLab/Models/ggml-base-q5_1.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q5_1.bin
+          ls -la ~/.config/ChopLab/Models
+
+      - name: Build tests
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --target ChopLabTests
+
+      - name: Analysis tests
+        run: build/ChopLabTests_artefacts/Release/ChopLabTests
+
+      - name: Lyrics tests
+        run: build/ChopLabTests_artefacts/Release/ChopLabTests --lyrics-test Tests/fixtures 0
+
   windows:
     name: Windows VST3
     runs-on: windows-latest
@@ -20,6 +54,12 @@ jobs:
 
       - name: Analysis tests (tempo, key, time signature, chop points)
         run: build/ChopLabTests_artefacts/Release/ChopLabTests.exe
+
+      - name: Download speech model (same code the plugin uses)
+        run: build/ChopLabTests_artefacts/Release/ChopLabTests.exe --download-model 0
+
+      - name: Lyrics tests
+        run: build/ChopLabTests_artefacts/Release/ChopLabTests.exe --lyrics-test Tests/fixtures 0
 
       - name: Plugin tests (load the VST3, play MIDI, check the audio, save and reload)
         run: build/ChopLabHostTests_artefacts/Release/ChopLabHostTests.exe build/ChopLab_artefacts/Release/VST3/ChopLab.vst3
