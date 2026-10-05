@@ -1,0 +1,6 @@
+build/
+build-*/
+libs/
+.DS_Store
+*.user
+.vs/
