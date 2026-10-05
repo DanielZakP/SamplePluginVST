@@ -1,6 +1,7 @@
 #pragma once
 
 #include "PluginProcessor.h"
+#include "UI/AboutOverlay.h"
 #include "UI/LyricsCard.h"
 #include "UI/Panels.h"
 #include "UI/PatternView.h"
@@ -48,7 +49,8 @@ private:
     juce::TooltipWindow tooltips { this, 700 };
 
     juce::TextButton loadButton { "Load sample" }, undoButton { "Undo" }, redoButton { "Redo" };
-    juce::TextButton chopsTab { "Chops" }, rollTab { "Piano roll" };
+    juce::TextButton chopsTab { "Chops" }, rollTab { "Piano roll" }, aboutButton { "About" };
+    choplab::AboutOverlay about;
 
     juce::Label bpmValue;
     juce::TextButton halfButton { "/2" }, doubleButton { "x2" };

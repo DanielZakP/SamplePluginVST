@@ -169,6 +169,14 @@ ChopLabEditor::ChopLabEditor (ChopLabProcessor& p)
     }
     chopsTab.setTooltip ("Waveform, chop list and chop settings");
     rollTab.setTooltip ("Piano roll where every row is a chop, with its label and lyrics. Drag the result into FL");
+    aboutButton.setTooltip ("Version, license and credits");
+    aboutButton.onClick = [this]
+    {
+        about.setVisible (true);
+        about.toFront (true);
+    };
+    addAndMakeVisible (aboutButton);
+    addChildComponent (about);
     chopsTab.onClick = [this] { showPage (0); };
     rollTab.onClick = [this] { showPage (1); };
 
@@ -358,6 +366,11 @@ bool ChopLabEditor::keyPressed (const juce::KeyPress& key)
             proc.previewSlice (sel);
         else
             proc.previewFull();
+        return true;
+    }
+    if (key == juce::KeyPress::escapeKey && about.isVisible())
+    {
+        about.setVisible (false);
         return true;
     }
     if (key == juce::KeyPress::escapeKey)
@@ -591,6 +604,7 @@ void ChopLabEditor::paintOverChildren (juce::Graphics& g)
 
 void ChopLabEditor::resized()
 {
+    about.setBounds (getLocalBounds());
     auto r = getLocalBounds();
     header = r.removeFromTop (46);
     {
@@ -603,6 +617,8 @@ void ChopLabEditor::resized()
         h.removeFromRight (16);
         rollTab.setBounds (h.removeFromRight (96));
         chopsTab.setBounds (h.removeFromRight (80));
+        h.removeFromRight (12);
+        aboutButton.setBounds (h.removeFromRight (64));
         h.removeFromRight (12);
         statusArea = h.removeFromRight (juce::jmin (420, h.getWidth() / 2));
     }

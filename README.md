@@ -81,9 +81,14 @@ build/ChopLabEngineTests_artefacts/Release/ChopLabEngineTests Tests/fixtures    
 build/ChopLabHostTests_artefacts/Release/ChopLabHostTests build/ChopLab_artefacts/Release/VST3/ChopLab.vst3
 ```
 
-## Credits and licenses
+## License
 
-- [JUCE](https://juce.com) plugin framework (AGPLv3, or JUCE's commercial licence, which has a free tier for small revenue)
-- [Signalsmith Stretch](https://github.com/Signalsmith-Audio/signalsmith-stretch) for pitch shifting and time stretching (MIT)
-- [whisper.cpp](https://github.com/ggml-org/whisper.cpp) for speech-to-text, with OpenAI's Whisper models (MIT)
-- The BPM, key, time signature and transient detection is written from scratch for this plugin.
+Copyright (C) 2026 DanielZakP and contributors.
+
+ChopLab is free software: you can redistribute it and/or modify it under the terms of the GNU Affero General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version. It is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See [LICENSE](LICENSE) for the full text.
+
+If you share a modified version, you have to share its source code under the same license.
+
+ChopLab is built on [JUCE](https://juce.com) (used under the AGPLv3), [whisper.cpp](https://github.com/ggml-org/whisper.cpp) with OpenAI's Whisper models, [Signalsmith Stretch](https://github.com/Signalsmith-Audio/signalsmith-stretch), the Steinberg VST3 SDK and a few libraries bundled with JUCE. Their licenses and copyright notices are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md); `tools/make_third_party_notices.py` regenerates that file after upgrading them.
+
+VST is a trademark of Steinberg Media Technologies GmbH. FL Studio is a trademark of Image-Line. ChopLab isn't affiliated with or endorsed by either.

@@ -71,10 +71,16 @@ jobs:
         run: build/ChopLabTests_artefacts/Release/ChopLabTests.exe --download-model 0
 
       - name: Lyrics tests
-        run: build/ChopLabTests_artefacts/Release/ChopLabTests.exe --lyrics-test Tests/fixtures 0
+        shell: pwsh
+        run: |
+          & build/ChopLabTests_artefacts/Release/ChopLabTests.exe --lyrics-test Tests/fixtures 0 2>&1 | Tee-Object -FilePath lyrics.txt
+          exit $LASTEXITCODE
 
       - name: Engine tests (pattern playback, undo, lyrics through the plugin)
-        run: build/ChopLabEngineTests_artefacts/Release/ChopLabEngineTests.exe Tests/fixtures
+        shell: pwsh
+        run: |
+          & build/ChopLabEngineTests_artefacts/Release/ChopLabEngineTests.exe Tests/fixtures 2>&1 | Tee-Object -FilePath engine.txt
+          exit $LASTEXITCODE
 
       - name: Plugin tests (load the VST3, play MIDI, check the audio, save and reload)
         run: build/ChopLabHostTests_artefacts/Release/ChopLabHostTests.exe build/ChopLab_artefacts/Release/VST3/ChopLab.vst3
@@ -87,12 +93,24 @@ jobs:
           ./pluginval/pluginval.exe --strictness-level 10 --validate-in-process --skip-gui-tests --timeout-ms 300000 --validate build/ChopLab_artefacts/Release/VST3/ChopLab.vst3
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Report test output
+        if: always()
+        shell: pwsh
+        run: |
+          foreach ($f in @("lyrics.txt", "engine.txt")) {
+            if (-not (Test-Path $f)) { continue }
+            $body = Get-Content $f -Raw
+            if ($body.Length -gt 3500) { $body = $body.Substring($body.Length - 3500) }
+            $body = $body.Replace("%", "%25").Replace("`r", "").Replace("`n", "%0A")
+            Write-Output "::notice title=windows-$f::$body"
+          }
+
       - name: Package
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item -Recurse build/ChopLab_artefacts/Release/VST3/ChopLab.vst3 dist/
-          Copy-Item README.md dist/
+          Copy-Item README.md, LICENSE, THIRD_PARTY_NOTICES.md dist/
 
       - uses: actions/upload-artifact@v4
         with:
