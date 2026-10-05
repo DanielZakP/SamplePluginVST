@@ -357,6 +357,30 @@ void WaveformView::paint (juce::Graphics& g)
         }
     }
 
+    // Lyrics along the bottom, each word where it's sung (skipping words that would overlap)
+    if (! d.lyrics.words.empty())
+    {
+        const auto wordFont = theme::font (12.0f);
+        g.setFont (wordFont);
+        const float y = (float) wave.getBottom() - 19.0f;
+        float lastRight = -1.0e9f;
+        for (const auto& w : d.lyrics.words)
+        {
+            const float x = sampleToX (w.start * d.sampleRate());
+            if (x > (float) wave.getRight())
+                break;
+            const float width = (float) juce::GlyphArrangement::getStringWidthInt (wordFont, w.text) + 8.0f;
+            if (x + width < (float) wave.getX() || x < lastRight + 3.0f)
+                continue;
+            const juce::Rectangle<float> box (x, y, width, 16.0f);
+            g.setColour (theme::background.withAlpha (0.75f));
+            g.fillRoundedRectangle (box, 3.0f);
+            g.setColour (theme::text.withAlpha (0.9f));
+            g.drawText (w.text, box, juce::Justification::centred, false);
+            lastRight = box.getRight();
+        }
+    }
+
     // Playheads
     g.setColour (theme::text);
     for (auto p : playing)

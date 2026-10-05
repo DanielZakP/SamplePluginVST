@@ -377,6 +377,10 @@ LyricsResult transcribeLyrics (const juce::AudioBuffer<float>& audio, double sam
     }
     whisper_free (ctx);
 
+    // Whisper's times wander by up to ~0.3 s; pull each word onto the nearby moment it actually starts.
+    std::stable_sort (result.words.begin(), result.words.end(), [] (const LyricWord& a, const LyricWord& b) { return a.start < b.start; });
+    snapWordsToOnsets (result.words, speechOnsets (audio, sampleRate));
+
     // Tidy timings: in order, no overlaps, every word at least 60 ms long.
     std::stable_sort (result.words.begin(), result.words.end(), [] (const LyricWord& a, const LyricWord& b) { return a.start < b.start; });
     const double length = (double) audio.getNumSamples() / sampleRate;
@@ -400,6 +404,158 @@ juce::String wordsBetween (const std::vector<LyricWord>& words, double startSeco
             parts.add (w.text);
     }
     return parts.joinIntoString (" ");
+}
+
+} // namespace choplab
+
+//==============================================================================
+namespace choplab
+{
+
+std::vector<double> speechOnsets (const juce::AudioBuffer<float>& audio, double sampleRate)
+{
+    std::vector<double> onsets;
+    const int n = audio.getNumSamples();
+    if (n == 0 || sampleRate <= 0.0)
+        return onsets;
+
+    // Speech band only, so bass and cymbals matter less
+    std::vector<float> x ((size_t) n, 0.0f);
+    for (int c = 0; c < audio.getNumChannels(); ++c)
+        for (int i = 0; i < n; ++i)
+            x[(size_t) i] += audio.getSample (c, i);
+    for (int stage = 0; stage < 2; ++stage)
+    {
+        juce::IIRFilter hp, lp;
+        hp.setCoefficients (juce::IIRCoefficients::makeHighPass (sampleRate, 150.0, 0.707));
+        lp.setCoefficients (juce::IIRCoefficients::makeLowPass (sampleRate, juce::jmin (4000.0, sampleRate * 0.45), 0.707));
+        hp.processSamples (x.data(), n);
+        lp.processSamples (x.data(), n);
+    }
+
+    // Level in dB, 20 ms windows every 5 ms
+    const int hop = juce::jmax (1, (int) (sampleRate * 0.005));
+    const int win = hop * 4;
+    std::vector<float> db;
+    for (int start = 0; start + win <= n; start += hop)
+    {
+        double e = 0.0;
+        for (int i = start; i < start + win; ++i)
+            e += (double) x[(size_t) i] * x[(size_t) i];
+        db.push_back ((float) (10.0 * std::log10 (e / win + 1.0e-12)));
+    }
+    if (db.size() < 10)
+        return onsets;
+    const float peak = *std::max_element (db.begin(), db.end());
+    const float floorDb = juce::jmax (-55.0f, peak - 40.0f);
+
+    // A word starts where the level climbs 9 dB or more above the recent minimum
+    double lastOnset = -1.0;
+    for (size_t k = 8; k < db.size(); ++k)
+    {
+        float recentMin = db[k - 1];
+        size_t minAt = k - 1;
+        for (size_t j = k - 8; j < k; ++j)
+            if (db[j] < recentMin)
+            {
+                recentMin = db[j];
+                minAt = j;
+            }
+        if (db[k] < floorDb || db[k] - recentMin < 9.0f)
+            continue;
+        // the onset is where it first rises 3 dB above that minimum
+        size_t at = minAt;
+        while (at < k && db[at] < recentMin + 3.0f)
+            ++at;
+        const double t = (double) at * hop / sampleRate + (double) win / sampleRate * 0.5;
+        if (t - lastOnset > 0.08)
+        {
+            onsets.push_back (t);
+            lastOnset = t;
+        }
+    }
+    return onsets;
+}
+
+void snapWordsToOnsets (std::vector<LyricWord>& words, const std::vector<double>& onsets, double maxShift)
+{
+    const size_t W = words.size(), O = onsets.size();
+    if (W == 0 || O == 0)
+        return;
+
+    // cost[i][j]: best total for the first i words using onsets before j. A word can keep its own
+    // estimate (cost = keepPenalty) or take a later onset within maxShift (cost = distance).
+    const double keepPenalty = maxShift * 1.2;
+    const double inf = 1.0e18;
+    std::vector<std::vector<double>> cost (W + 1, std::vector<double> (O + 1, inf));
+    std::vector<std::vector<int>> choice (W + 1, std::vector<int> (O + 1, -2));
+    for (size_t j = 0; j <= O; ++j)
+        cost[0][j] = 0.0;
+
+    std::vector<double> prefixMin (O + 1);
+    for (size_t i = 1; i <= W; ++i)
+    {
+        const double est = words[i - 1].start;
+        // prefixMin[j] = min of cost[i-1][0..j-1]
+        prefixMin[0] = inf;
+        for (size_t j = 1; j <= O; ++j)
+            prefixMin[j] = std::min (prefixMin[j - 1], cost[i - 1][j - 1]);
+        for (size_t j = 0; j <= O; ++j)
+        {
+            // keep the estimate; onsets before j are still unused
+            double best = cost[i - 1][j] + keepPenalty;
+            int pick = -1;
+            // or take onset j-1, if it's after whatever the previous words used
+            if (j > 0)
+            {
+                const double d = std::abs (onsets[j - 1] - est);
+                if (d <= maxShift)
+                {
+                    const double prev = prefixMin[j];
+                    if (prev + d < best)
+                    {
+                        best = prev + d;
+                        pick = (int) j - 1;
+                    }
+                }
+                // or leave onset j-1 unused
+                if (cost[i][j - 1] < best)
+                {
+                    best = cost[i][j - 1];
+                    pick = -3;
+                }
+            }
+            cost[i][j] = best;
+            choice[i][j] = pick;
+        }
+    }
+
+    // Walk back through the choices
+    size_t j = O;
+    for (size_t i = W; i > 0;)
+    {
+        const int c = choice[i][j];
+        if (c == -3)
+        {
+            --j;
+            continue;
+        }
+        if (c >= 0)
+        {
+            words[i - 1].start = onsets[(size_t) c];
+            // the previous word must use an onset before this one
+            size_t bestJ = 0;
+            double bestCost = inf;
+            for (size_t jj = 0; jj <= (size_t) c; ++jj)
+                if (cost[i - 1][jj] < bestCost)
+                {
+                    bestCost = cost[i - 1][jj];
+                    bestJ = jj;
+                }
+            j = bestJ;
+        }
+        --i;
+    }
 }
 
 } // namespace choplab

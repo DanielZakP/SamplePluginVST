@@ -18,12 +18,13 @@ public:
 
 private:
     void push();
+    void pushLyrics();
     SliceSettings current() const;
     bool showingValidChop() const;
 
     ChopLabProcessor& proc;
     std::function<juce::File (int)> exportChop;
-    juce::TextEditor label;
+    juce::TextEditor label, lyrics;
     juce::TextButton playButton { "Play" }, barOneButton { "Set as bar 1" }, resetButton { "Reset" };
     DragOutButton dragWav;
     Knob pitch, speed, gain, attack, release;

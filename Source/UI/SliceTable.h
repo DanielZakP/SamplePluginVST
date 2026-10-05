@@ -25,6 +25,7 @@ private:
         colIndex = 1,
         colNote,
         colLabel,
+        colLyrics,
         colBar,
         colOn,
         colLength,

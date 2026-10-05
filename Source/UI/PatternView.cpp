@@ -1,0 +1,844 @@
+#include "PatternView.h"
+#include "Theme.h"
+
+namespace choplab
+{
+
+namespace
+{
+struct Choice
+{
+    const char* name;
+    double value;
+};
+// Snap in quarter-note beats; -1 = one bar
+const Choice kSnaps[] { { "None", 0.0 }, { "1/32", 0.125 }, { "1/16", 0.25 }, { "1/8", 0.5 }, { "1/4 (beat)", 1.0 },
+                        { "1/2", 2.0 },  { "Bar", -1.0 },   { "1/16 triplet", 1.0 / 6.0 }, { "1/8 triplet", 1.0 / 3.0 } };
+const int kBars[] { 1, 2, 4, 8, 16, 32, 64 };
+constexpr int kHeaderWidth = 250;
+constexpr int kRulerHeight = 20;
+constexpr int kVelocityHeight = 60;
+constexpr int kScroll = 10;
+} // namespace
+
+PatternView::PatternView (ChopLabProcessor& p)
+    : proc (p),
+      dragMidi ("Drag MIDI to FL", [this] { return proc.writePatternMidi (proc.getDragFolder()); })
+{
+    setWantsKeyboardFocus (true);
+
+    playButton.onClick = [this] { proc.playPattern (true); };
+    stopButton.onClick = [this] { proc.playPattern (false); };
+    playButton.setTooltip ("Play the pattern in a loop at the project tempo (Space)");
+    fillButton.setTooltip ("Fill the pattern with every chop in its original place, a starting point for flipping the sample");
+    fillButton.onClick = [this] { proc.fillPatternFromSample(); };
+    clearButton.onClick = [this]
+    {
+        auto p2 = proc.doc().pattern;
+        p2.notes.clear();
+        proc.setPattern (p2);
+    };
+    dragMidi.setTooltip ("Drag into FL's piano roll or playlist. The notes play the same chops on this channel");
+    dragMidi.onClick = [this]
+    {
+        if (auto f = proc.writePatternMidi (proc.getDragFolder()); f.existsAsFile())
+            f.revealToUser();
+    };
+
+    for (int i = 0; i < (int) std::size (kBars); ++i)
+        lengthBox.addItem (juce::String (kBars[i]) + (kBars[i] == 1 ? " bar" : " bars"), i + 1);
+    lengthBox.setTooltip ("Pattern length");
+    lengthBox.onChange = [this]
+    {
+        const int i = lengthBox.getSelectedId() - 1;
+        if (i < 0)
+            return;
+        auto p2 = proc.doc().pattern;
+        p2.lengthBeats = kBars[i] * barBeats (proc.doc().timeSig);
+        proc.setPattern (p2);
+        fitToWidth();
+    };
+
+    for (int i = 0; i < (int) std::size (kSnaps); ++i)
+        snapBox.addItem (kSnaps[i].name, i + 1);
+    snapBox.setTooltip ("Grid snap (hold Alt while dragging to ignore it)");
+    snapBox.onChange = [this]
+    {
+        const int i = snapBox.getSelectedId() - 1;
+        if (i < 0)
+            return;
+        auto p2 = proc.doc().pattern;
+        p2.snapBeats = kSnaps[i].value < 0.0 ? barBeats (proc.doc().timeSig) : kSnaps[i].value;
+        proc.setPattern (p2);
+    };
+
+    for (auto* c : std::initializer_list<juce::Component*> { &playButton, &stopButton, &fillButton, &clearButton, &lengthBox, &snapBox, &dragMidi,
+                                                             &hScroll, &vScroll })
+        addAndMakeVisible (c);
+    hScroll.addListener (this);
+    vScroll.addListener (this);
+    hScroll.setAutoHide (false);
+    vScroll.setAutoHide (false);
+    startTimerHz (30);
+}
+
+PatternView::~PatternView()
+{
+    hScroll.removeListener (this);
+    vScroll.removeListener (this);
+}
+
+//==============================================================================
+void PatternView::documentChanged()
+{
+    const auto& d = proc.doc();
+    if (drag == Drag::none)
+    {
+        working = d.pattern;
+        selected.resize (working.notes.size(), false);
+    }
+
+    const int sampleId = (int) (juce::pointer_sized_int) d.sample.get();
+    if (sampleId != lastSample)
+    {
+        lastSample = sampleId;
+        fittedForSample = false;
+    }
+    if (! fittedForSample && getWidth() > 0)
+    {
+        fitToWidth();
+        fittedForSample = true;
+        scrollY = 1.0e9f; // start at the bottom, where chop 1 is
+        clampScroll();
+    }
+
+    const double bar = barBeats (d.timeSig);
+    int lengthId = 0;
+    for (int i = 0; i < (int) std::size (kBars); ++i)
+        if (std::abs (kBars[i] * bar - working.lengthBeats) < 1.0e-6)
+            lengthId = i + 1;
+    if (lengthId > 0)
+        lengthBox.setSelectedId (lengthId, juce::dontSendNotification);
+    else
+        lengthBox.setText (juce::String (working.lengthBeats / bar, 2) + " bars", juce::dontSendNotification);
+
+    int snapId = 0;
+    for (int i = 0; i < (int) std::size (kSnaps); ++i)
+    {
+        const double v = kSnaps[i].value < 0.0 ? bar : kSnaps[i].value;
+        if (std::abs (v - working.snapBeats) < 1.0e-6 && snapId == 0)
+            snapId = i + 1;
+    }
+    snapBox.setSelectedId (juce::jmax (1, snapId), juce::dontSendNotification);
+
+    const bool has = d.hasSample();
+    for (auto* c : std::initializer_list<juce::Component*> { &playButton, &stopButton, &fillButton, &clearButton, &lengthBox, &snapBox })
+        c->setEnabled (has);
+    dragMidi.setEnabled (has && ! working.notes.empty());
+    playButton.setToggleState (proc.isPatternPlaying(), juce::dontSendNotification);
+    updateScrollbars();
+    repaint();
+}
+
+void PatternView::resized()
+{
+    auto r = getLocalBounds();
+    toolbar = r.removeFromTop (40);
+    {
+        auto t = toolbar.reduced (12, 7);
+        playButton.setBounds (t.removeFromLeft (60));
+        t.removeFromLeft (4);
+        stopButton.setBounds (t.removeFromLeft (52));
+        t.removeFromLeft (14);
+        lengthCaption = t.removeFromLeft (52);
+        lengthBox.setBounds (t.removeFromLeft (90));
+        t.removeFromLeft (10);
+        snapCaption = t.removeFromLeft (40);
+        snapBox.setBounds (t.removeFromLeft (110));
+        t.removeFromLeft (14);
+        fillButton.setBounds (t.removeFromLeft (172));
+        t.removeFromLeft (4);
+        clearButton.setBounds (t.removeFromLeft (56));
+        dragMidi.setBounds (t.removeFromRight (150));
+        t.removeFromRight (12);
+        hintArea = t.withTrimmedLeft (12);
+    }
+
+    r.removeFromTop (8);
+    auto body = r;
+    vScroll.setBounds (body.removeFromRight (kScroll).withTrimmedTop (kRulerHeight).withTrimmedBottom (kVelocityHeight + kScroll));
+    hScroll.setBounds (body.removeFromBottom (kScroll).withTrimmedLeft (kHeaderWidth));
+    headerArea = body.removeFromLeft (kHeaderWidth);
+    rulerArea = body.removeFromTop (kRulerHeight);
+    headerArea.removeFromTop (kRulerHeight);
+    velocityArea = body.removeFromBottom (kVelocityHeight);
+    headerArea.removeFromBottom (kVelocityHeight);
+    gridArea = body;
+
+    if (! fittedForSample && proc.doc().hasSample())
+    {
+        fitToWidth();
+        fittedForSample = true;
+        scrollY = 1.0e9f;
+    }
+    clampScroll();
+    updateScrollbars();
+}
+
+//==============================================================================
+int PatternView::numRows() const { return juce::jmax (1, (int) proc.doc().slices.size()); }
+
+float PatternView::beatToX (double beat) const { return (float) gridArea.getX() + (float) ((beat - scrollBeats) * pxPerBeat); }
+
+double PatternView::xToBeat (float x) const { return scrollBeats + (double) (x - (float) gridArea.getX()) / pxPerBeat; }
+
+// Like any piano roll, higher notes (later chops) are higher up.
+float PatternView::yForChop (int chop) const
+{
+    return (float) gridArea.getY() + (float) (numRows() - 1 - chop) * rowHeight - scrollY;
+}
+
+int PatternView::rowAtY (float y) const
+{
+    const int fromTop = (int) std::floor ((y - (float) gridArea.getY() + scrollY) / rowHeight);
+    const int chop = numRows() - 1 - fromTop;
+    return chop >= 0 && chop < (int) proc.doc().slices.size() ? chop : -1;
+}
+
+juce::Rectangle<float> PatternView::noteBounds (const PatternNote& n) const
+{
+    const float x0 = beatToX (n.start), x1 = beatToX (n.end());
+    return { x0, yForChop (n.chop) + 1.0f, juce::jmax (3.0f, x1 - x0), rowHeight - 2.0f };
+}
+
+int PatternView::noteAt (juce::Point<float> p) const
+{
+    for (int i = (int) working.notes.size(); --i >= 0;)
+        if (noteBounds (working.notes[(size_t) i]).contains (p))
+            return i;
+    return -1;
+}
+
+double PatternView::snap() const { return working.snapBeats; }
+
+double PatternView::snapDown (double beat, bool fine) const
+{
+    const double s = snap();
+    return (fine || s <= 0.0) ? beat : std::floor (beat / s + 1.0e-9) * s;
+}
+
+double PatternView::snapNearest (double beat, bool fine) const
+{
+    const double s = snap();
+    return (fine || s <= 0.0) ? beat : std::round (beat / s) * s;
+}
+
+// New notes play the whole chop, rounded to the grid
+double PatternView::defaultLength (int chop) const
+{
+    const auto& d = proc.doc();
+    double len = chop >= 0 && chop < (int) d.slices.size() ? d.lengthInBeats (d.slices[(size_t) chop]) : 1.0;
+    const double s = snap() > 0.0 ? snap() : 0.25;
+    return juce::jmax (s, std::round (len / s) * s);
+}
+
+void PatternView::fitToWidth()
+{
+    const double len = juce::jmax (1.0, proc.doc().pattern.lengthBeats);
+    pxPerBeat = juce::jlimit (6.0, 400.0, (gridArea.getWidth() - 8) / len);
+    scrollBeats = 0.0;
+    updateScrollbars();
+    repaint();
+}
+
+void PatternView::clampScroll()
+{
+    const float content = (float) numRows() * rowHeight;
+    scrollY = juce::jlimit (0.0f, juce::jmax (0.0f, content - (float) gridArea.getHeight()), scrollY);
+    const double visibleBeats = gridArea.getWidth() / pxPerBeat;
+    scrollBeats = juce::jlimit (0.0, juce::jmax (0.0, working.lengthBeats + 4.0 - visibleBeats), scrollBeats);
+}
+
+void PatternView::updateScrollbars()
+{
+    const double visibleBeats = juce::jmax (1.0, gridArea.getWidth() / pxPerBeat);
+    hScroll.setRangeLimits (0.0, juce::jmax (visibleBeats, working.lengthBeats + 4.0), juce::dontSendNotification);
+    hScroll.setCurrentRange (scrollBeats, visibleBeats, juce::dontSendNotification);
+    const double content = numRows() * (double) rowHeight;
+    vScroll.setRangeLimits (0.0, juce::jmax (content, (double) gridArea.getHeight()), juce::dontSendNotification);
+    vScroll.setCurrentRange (scrollY, gridArea.getHeight(), juce::dontSendNotification);
+}
+
+void PatternView::scrollBarMoved (juce::ScrollBar* bar, double start)
+{
+    if (bar == &hScroll)
+        scrollBeats = start;
+    else
+        scrollY = (float) start;
+    repaint();
+}
+
+void PatternView::timerCallback()
+{
+    if (proc.isPatternPlaying() != playButton.getToggleState())
+        playButton.setToggleState (proc.isPatternPlaying(), juce::dontSendNotification);
+    if (proc.isPatternPlaying())
+        repaint (gridArea.getUnion (rulerArea));
+}
+
+//==============================================================================
+juce::String PatternView::noteText (int chop) const
+{
+    const auto& d = proc.doc();
+    if (chop < 0 || chop >= (int) d.slices.size())
+        return {};
+    const auto& label = d.slices[(size_t) chop].settings.label;
+    const auto lyrics = d.lyricsFor (chop);
+    if (label.isNotEmpty())
+        return lyrics.isNotEmpty() ? label + ": " + lyrics : label;
+    return lyrics.isNotEmpty() ? lyrics : juce::String (chop + 1);
+}
+
+void PatternView::drawRows (juce::Graphics& g)
+{
+    const auto& d = proc.doc();
+    g.saveState();
+    g.reduceClipRegion (headerArea);
+    g.setColour (theme::panelRaised);
+    g.fillRect (headerArea);
+
+    for (int chop = 0; chop < (int) d.slices.size(); ++chop)
+    {
+        const float y = yForChop (chop) - (float) gridArea.getY() + (float) headerArea.getY();
+        if (y + rowHeight < (float) headerArea.getY() || y > (float) headerArea.getBottom())
+            continue;
+        auto row = juce::Rectangle<float> ((float) headerArea.getX(), y, (float) headerArea.getWidth(), rowHeight);
+        const bool sel = chop == proc.selectedSlice;
+        if (sel)
+        {
+            g.setColour (theme::sliceColour (chop).withAlpha (0.18f));
+            g.fillRect (row);
+        }
+        g.setColour (theme::sliceColour (chop));
+        g.fillRect (row.removeFromLeft (4.0f).reduced (0.0f, 3.0f));
+        row.removeFromLeft (6.0f);
+
+        g.setFont (theme::font (12.5f, true));
+        g.drawText (juce::String (chop + 1), row.removeFromLeft (24.0f), juce::Justification::centredLeft);
+        g.setColour (theme::textDim);
+        g.setFont (theme::mono (12.0f));
+        const int note = d.noteForSlice (chop);
+        g.drawText (note >= 0 ? midiNoteName (note) : juce::String ("-"), row.removeFromLeft (36.0f), juce::Justification::centredLeft);
+
+        const auto& s = d.slices[(size_t) chop];
+        const auto lyrics = d.lyricsFor (chop);
+        juce::String main = s.settings.label.isNotEmpty() ? s.settings.label : s.info.type;
+        g.setColour (s.settings.label.isNotEmpty() ? theme::text : theme::textDim);
+        g.setFont (theme::font (13.0f, s.settings.label.isNotEmpty()));
+        const float mainW = juce::jmin (row.getWidth() * 0.45f, (float) juce::GlyphArrangement::getStringWidthInt (g.getCurrentFont(), main) + 8.0f);
+        g.drawText (main, row.removeFromLeft (mainW), juce::Justification::centredLeft, true);
+        if (lyrics.isNotEmpty())
+        {
+            g.setColour (theme::warn.withAlpha (0.9f));
+            g.setFont (theme::font (12.5f));
+            g.drawText (juce::String (juce::CharPointer_UTF8 ("\xe2\x80\x9c")) + lyrics + juce::String (juce::CharPointer_UTF8 ("\xe2\x80\x9d")), row.reduced (2.0f, 0.0f),
+                        juce::Justification::centredLeft, true);
+        }
+        else if (s.info.harmony.isNotEmpty())
+        {
+            g.setColour (theme::textFaint);
+            g.setFont (theme::font (12.0f));
+            g.drawText (s.info.harmony, row.reduced (2.0f, 0.0f), juce::Justification::centredLeft, true);
+        }
+        g.setColour (theme::outline.withAlpha (0.6f));
+        g.drawHorizontalLine ((int) (y + rowHeight) - 1, (float) headerArea.getX(), (float) headerArea.getRight());
+    }
+    g.restoreState();
+    g.setColour (theme::outline);
+    g.drawVerticalLine (headerArea.getRight() - 1, (float) headerArea.getY(), (float) headerArea.getBottom());
+}
+
+void PatternView::drawGrid (juce::Graphics& g)
+{
+    const auto& d = proc.doc();
+    g.setColour (theme::panel);
+    g.fillRect (gridArea);
+
+    // Row shading, tinted by chop colour
+    for (int chop = 0; chop < (int) d.slices.size(); ++chop)
+    {
+        const float y = yForChop (chop);
+        if (y + rowHeight < (float) gridArea.getY() || y > (float) gridArea.getBottom())
+            continue;
+        g.setColour (chop == proc.selectedSlice ? theme::sliceColour (chop).withAlpha (0.10f)
+                                                : (chop % 2 == 0 ? theme::panel : theme::panelRaised.withAlpha (0.5f)));
+        g.fillRect ((float) gridArea.getX(), y, (float) gridArea.getWidth(), rowHeight);
+    }
+
+    const double bar = barBeats (d.timeSig);
+    const double unit = 4.0 / juce::jmax (1, d.timeSig.denominator);
+    const double first = juce::jmax (0.0, std::floor (scrollBeats));
+    const double last = xToBeat ((float) gridArea.getRight());
+    const double step = pxPerBeat * 0.25 >= 7.0 ? 0.25 : pxPerBeat * unit >= 7.0 ? unit : bar;
+    g.setFont (theme::font (11.0f));
+    for (double b = std::floor (first / step) * step; b <= last; b += step)
+    {
+        const float x = beatToX (b);
+        if (x < (float) gridArea.getX())
+            continue;
+        const double inBar = std::fmod (b + 1.0e-9, bar);
+        const bool isBar = inBar < 1.0e-6;
+        const bool isBeat = std::fmod (b + 1.0e-9, unit) < 1.0e-6;
+        g.setColour (isBar ? theme::outline.brighter (0.4f) : isBeat ? theme::outline : theme::outline.withAlpha (0.35f));
+        g.drawVerticalLine ((int) x, (float) gridArea.getY(), (float) gridArea.getBottom());
+        g.drawVerticalLine ((int) x, (float) velocityArea.getY(), (float) velocityArea.getBottom());
+        if (isBar)
+        {
+            g.setColour (theme::textDim);
+            g.drawText (juce::String ((int) std::round (b / bar) + 1), (int) x + 3, rulerArea.getY(), 40, rulerArea.getHeight(),
+                        juce::Justification::centredLeft, false);
+        }
+    }
+
+    // Past the end of the pattern
+    const float endX = beatToX (working.lengthBeats);
+    if (endX < (float) gridArea.getRight())
+    {
+        g.setColour (theme::background.withAlpha (0.6f));
+        g.fillRect (juce::Rectangle<float> (endX, (float) gridArea.getY(), (float) gridArea.getRight() - endX, (float) gridArea.getHeight()));
+        g.setColour (theme::accent.withAlpha (0.7f));
+        g.drawVerticalLine ((int) endX, (float) rulerArea.getY(), (float) gridArea.getBottom());
+    }
+}
+
+void PatternView::drawNotes (juce::Graphics& g)
+{
+    g.saveState();
+    g.reduceClipRegion (gridArea);
+    for (size_t i = 0; i < working.notes.size(); ++i)
+    {
+        const auto& n = working.notes[i];
+        if (n.chop < 0 || n.chop >= (int) proc.doc().slices.size())
+            continue;
+        const auto r = noteBounds (n);
+        if (r.getRight() < (float) gridArea.getX() || r.getX() > (float) gridArea.getRight())
+            continue;
+        const bool sel = i < selected.size() && selected[i];
+        const auto c = theme::sliceColour (n.chop);
+        g.setColour (c.withAlpha (0.45f + 0.55f * n.velocity).brighter (sel ? 0.25f : 0.0f));
+        g.fillRoundedRectangle (r, 3.0f);
+        g.setColour (sel ? theme::text : c.darker (0.5f));
+        g.drawRoundedRectangle (r.reduced (0.5f), 3.0f, sel ? 1.5f : 1.0f);
+        if (r.getWidth() > 18.0f)
+        {
+            g.setColour (juce::Colours::black.withAlpha (0.85f));
+            g.setFont (theme::font (12.0f));
+            g.drawText (noteText (n.chop), r.reduced (5.0f, 0.0f), juce::Justification::centredLeft, true);
+        }
+    }
+
+    if (drag == Drag::select && ! selectionBox.isEmpty())
+    {
+        g.setColour (theme::accent.withAlpha (0.12f));
+        g.fillRect (selectionBox);
+        g.setColour (theme::accent);
+        g.drawRect (selectionBox, 1.0f);
+    }
+
+    if (proc.isPatternPlaying())
+    {
+        g.setColour (theme::text);
+        const float x = beatToX (proc.getPatternPosition());
+        g.fillRect (x - 0.5f, (float) gridArea.getY(), 1.5f, (float) gridArea.getHeight());
+    }
+    g.restoreState();
+}
+
+void PatternView::drawVelocity (juce::Graphics& g)
+{
+    g.setColour (theme::panelRaised);
+    g.fillRect (velocityArea);
+    g.setColour (theme::outline);
+    g.drawHorizontalLine (velocityArea.getY(), (float) velocityArea.getX(), (float) velocityArea.getRight());
+    g.saveState();
+    g.reduceClipRegion (velocityArea);
+    const float h = (float) velocityArea.getHeight() - 6.0f;
+    for (size_t i = 0; i < working.notes.size(); ++i)
+    {
+        const auto& n = working.notes[i];
+        const float x = beatToX (n.start);
+        const float barH = h * n.velocity;
+        const bool sel = i < selected.size() && selected[i];
+        g.setColour (theme::sliceColour (n.chop).withAlpha (sel ? 1.0f : 0.7f));
+        g.fillRect (x, (float) velocityArea.getBottom() - barH - 2.0f, 3.0f, barH);
+        g.fillEllipse (x - 2.0f, (float) velocityArea.getBottom() - barH - 4.0f, 7.0f, 7.0f);
+    }
+    g.restoreState();
+}
+
+void PatternView::paint (juce::Graphics& g)
+{
+    g.setColour (theme::panel);
+    g.fillRoundedRectangle (toolbar.toFloat(), 8.0f);
+    g.setColour (theme::textDim);
+    g.setFont (theme::font (11.0f, true));
+    g.drawText ("LENGTH", lengthCaption, juce::Justification::centredLeft);
+    g.drawText ("SNAP", snapCaption, juce::Justification::centredLeft);
+    g.setFont (theme::font (12.0f));
+    g.drawText ("Click: add   Right-click: delete   Drag edge: resize   Ctrl+drag: select", hintArea, juce::Justification::centredLeft, true);
+
+    g.setColour (theme::panelRaised);
+    g.fillRect (rulerArea.withLeft (headerArea.getX()));
+    g.setColour (theme::textDim);
+    g.setFont (theme::font (11.0f, true));
+    g.drawText ("CHOP / NOTE / LABEL / LYRICS", rulerArea.withLeft (headerArea.getX() + 8).withWidth (kHeaderWidth - 8),
+                juce::Justification::centredLeft);
+    g.drawText ("VELOCITY", velocityArea.withX (headerArea.getX() + 8).withWidth (kHeaderWidth - 8), juce::Justification::centredLeft);
+
+    if (! proc.doc().hasSample())
+    {
+        g.setColour (theme::panel);
+        g.fillRect (gridArea.getUnion (headerArea));
+        g.setColour (theme::textDim);
+        g.setFont (theme::font (16.0f));
+        g.drawText ("Load a sample first", gridArea.getUnion (headerArea), juce::Justification::centred);
+        return;
+    }
+
+    drawGrid (g);
+    drawRows (g);
+    drawNotes (g);
+    drawVelocity (g);
+
+    if (working.notes.empty())
+    {
+        g.setColour (theme::textDim);
+        g.setFont (theme::font (15.0f));
+        g.drawFittedText ("Click in the grid to place chops,\nor press \"Start from sample order\" to lay out the original.",
+                          gridArea.reduced (20), juce::Justification::centred, 3);
+    }
+}
+
+//==============================================================================
+void PatternView::commit (bool newEdit)
+{
+    proc.setPattern (working, newEdit);
+}
+
+void PatternView::selectOnly (int index)
+{
+    selected.assign (working.notes.size(), false);
+    if (index >= 0 && index < (int) selected.size())
+        selected[(size_t) index] = true;
+}
+
+void PatternView::deleteSelected()
+{
+    std::vector<PatternNote> kept;
+    for (size_t i = 0; i < working.notes.size(); ++i)
+        if (! (i < selected.size() && selected[i]))
+            kept.push_back (working.notes[i]);
+    if (kept.size() == working.notes.size())
+        return;
+    working.notes = kept;
+    selected.assign (working.notes.size(), false);
+    commit (true);
+}
+
+void PatternView::mouseMove (const juce::MouseEvent& e)
+{
+    const auto p = e.position;
+    if (gridArea.contains (p.toInt()))
+    {
+        const int n = noteAt (p);
+        const bool edge = n >= 0 && p.x > noteBounds (working.notes[(size_t) n]).getRight() - 6.0f;
+        setMouseCursor (edge ? juce::MouseCursor::LeftRightResizeCursor : n >= 0 ? juce::MouseCursor::DraggingHandCursor
+                                                                                 : juce::MouseCursor::NormalCursor);
+    }
+    else
+    {
+        setMouseCursor (juce::MouseCursor::NormalCursor);
+    }
+}
+
+void PatternView::mouseDown (const juce::MouseEvent& e)
+{
+    grabKeyboardFocus();
+    drag = Drag::none;
+    dragCommitted = false;
+    if (! proc.doc().hasSample())
+        return;
+    const auto p = e.position;
+
+    // Row header: hear the chop
+    if (headerArea.contains (p.toInt()))
+    {
+        const int chop = rowAtY (p.y - (float) headerArea.getY() + (float) gridArea.getY());
+        if (chop >= 0)
+        {
+            proc.selectSlice (chop);
+            proc.previewSlice (chop);
+        }
+        return;
+    }
+
+    if (velocityArea.contains (p.toInt()))
+    {
+        drag = Drag::velocity;
+        mouseDrag (e);
+        return;
+    }
+
+    if (! gridArea.contains (p.toInt()))
+        return;
+
+    if (e.mods.isPopupMenu())
+    {
+        drag = Drag::erase;
+        mouseDrag (e);
+        return;
+    }
+
+    const int hit = noteAt (p);
+    if (hit >= 0)
+    {
+        const auto& n = working.notes[(size_t) hit];
+        if (! selected[(size_t) hit])
+        {
+            if (! e.mods.isShiftDown())
+                selected.assign (working.notes.size(), false);
+            selected[(size_t) hit] = true;
+        }
+        grabbedNote = hit;
+        drag = p.x > noteBounds (n).getRight() - 6.0f ? Drag::resize : Drag::move;
+        proc.selectSlice (n.chop);
+        proc.previewSlice (n.chop);
+    }
+    else if (e.mods.isCtrlDown() || e.mods.isCommandDown())
+    {
+        drag = Drag::select;
+        selectionBox = {};
+    }
+    else
+    {
+        const int chop = rowAtY (p.y);
+        if (chop < 0)
+            return;
+        const double start = snapDown (xToBeat (p.x), e.mods.isAltDown());
+        if (start < 0.0 || start >= working.lengthBeats)
+            return;
+        working.notes.push_back ({ chop, start, juce::jmin (defaultLength (chop), working.lengthBeats - start), 0.8f });
+        selectOnly ((int) working.notes.size() - 1);
+        grabbedNote = (int) working.notes.size() - 1;
+        drag = Drag::move;
+        commit (true);
+        dragCommitted = true; // the new note and dragging it are one undo step
+        proc.selectSlice (chop);
+        proc.previewSlice (chop);
+    }
+
+    grabBeat = xToBeat (p.x);
+    grabRow = rowAtY (p.y);
+    dragOriginal = working.notes;
+    repaint();
+}
+
+void PatternView::mouseDrag (const juce::MouseEvent& e)
+{
+    const auto p = e.position;
+    const bool fine = e.mods.isAltDown();
+    switch (drag)
+    {
+        case Drag::move:
+        {
+            if (grabbedNote < 0 || e.getDistanceFromDragStart() < 2)
+                return;
+            const auto& orig = dragOriginal[(size_t) grabbedNote];
+            const double newStart = snapNearest (orig.start + (xToBeat (p.x) - grabBeat), fine);
+            const double delta = newStart - orig.start;
+            const int row = rowAtY (juce::jlimit ((float) gridArea.getY(), (float) gridArea.getBottom() - 1.0f, p.y));
+            const int rowDelta = row >= 0 && grabRow >= 0 ? row - grabRow : 0;
+            for (size_t i = 0; i < working.notes.size(); ++i)
+                if (selected[i])
+                {
+                    auto& n = working.notes[i];
+                    n.start = juce::jlimit (0.0, juce::jmax (0.0, working.lengthBeats - 1.0e-3), dragOriginal[i].start + delta);
+                    n.chop = juce::jlimit (0, numRows() - 1, dragOriginal[i].chop + rowDelta);
+                }
+            if (rowDelta != 0 && working.notes[(size_t) grabbedNote].chop != proc.selectedSlice)
+                proc.selectSlice (working.notes[(size_t) grabbedNote].chop);
+            commit (! dragCommitted);
+            dragCommitted = true;
+            break;
+        }
+        case Drag::resize:
+        {
+            if (grabbedNote < 0)
+                return;
+            const auto& orig = dragOriginal[(size_t) grabbedNote];
+            const double minLen = snap() > 0.0 && ! fine ? snap() : 1.0 / 64.0;
+            const double newEnd = snapNearest (xToBeat (p.x), fine);
+            const double delta = juce::jmax (minLen, newEnd - orig.start) - orig.length;
+            for (size_t i = 0; i < working.notes.size(); ++i)
+                if (selected[i])
+                    working.notes[i].length = juce::jmax (minLen, dragOriginal[i].length + delta);
+            commit (! dragCommitted);
+            dragCommitted = true;
+            break;
+        }
+        case Drag::select:
+        {
+            selectionBox = juce::Rectangle<float> (e.mouseDownPosition, p).getIntersection (gridArea.toFloat());
+            for (size_t i = 0; i < working.notes.size(); ++i)
+                selected[i] = noteBounds (working.notes[i]).intersects (selectionBox);
+            repaint();
+            break;
+        }
+        case Drag::erase:
+        {
+            const int hit = noteAt (p);
+            if (hit >= 0)
+            {
+                working.notes.erase (working.notes.begin() + hit);
+                selected.erase (selected.begin() + hit);
+                commit (! dragCommitted);
+                dragCommitted = true;
+            }
+            break;
+        }
+        case Drag::velocity:
+        {
+            const float v = juce::jlimit (0.05f, 1.0f, 1.0f - (p.y - (float) velocityArea.getY() - 3.0f) / ((float) velocityArea.getHeight() - 6.0f));
+            bool anySelected = false;
+            for (bool s : selected)
+                anySelected = anySelected || s;
+            bool changed = false;
+            for (size_t i = 0; i < working.notes.size(); ++i)
+            {
+                const float x = beatToX (working.notes[i].start);
+                if (std::abs (x - p.x) <= 5.0f && (! anySelected || selected[i]))
+                {
+                    working.notes[i].velocity = v;
+                    changed = true;
+                }
+            }
+            if (changed)
+            {
+                commit (! dragCommitted);
+                dragCommitted = true;
+            }
+            break;
+        }
+        case Drag::none:
+        default:
+            break;
+    }
+}
+
+void PatternView::mouseUp (const juce::MouseEvent&)
+{
+    drag = Drag::none;
+    grabbedNote = -1;
+    selectionBox = {};
+    documentChanged();
+}
+
+void PatternView::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& w)
+{
+    if (e.mods.isCtrlDown() || e.mods.isCommandDown())
+    {
+        const double anchor = xToBeat (e.position.x);
+        pxPerBeat = juce::jlimit (6.0, 400.0, pxPerBeat * std::exp (w.deltaY * 1.5));
+        scrollBeats = anchor - (e.position.x - (float) gridArea.getX()) / pxPerBeat;
+    }
+    else if (e.mods.isShiftDown() || std::abs (w.deltaX) > std::abs (w.deltaY))
+    {
+        const float d = std::abs (w.deltaX) > std::abs (w.deltaY) ? w.deltaX : w.deltaY;
+        scrollBeats -= d * gridArea.getWidth() / pxPerBeat * 0.4;
+    }
+    else
+    {
+        scrollY -= w.deltaY * rowHeight * 8.0f;
+    }
+    clampScroll();
+    updateScrollbars();
+    repaint();
+}
+
+bool PatternView::keyPressed (const juce::KeyPress& key)
+{
+    const auto cmd = juce::ModifierKeys::commandModifier;
+    if (key == juce::KeyPress::deleteKey || key == juce::KeyPress::backspaceKey)
+    {
+        deleteSelected();
+        return true;
+    }
+    if (key == juce::KeyPress ('a', cmd, 0))
+    {
+        selected.assign (working.notes.size(), true);
+        repaint();
+        return true;
+    }
+    if (key == juce::KeyPress ('c', cmd, 0) || key == juce::KeyPress ('v', cmd, 0))
+    {
+        if (key.getKeyCode() == 'c' || key.getKeyCode() == 'C')
+        {
+            clipboard.clear();
+            for (size_t i = 0; i < working.notes.size(); ++i)
+                if (selected[i])
+                    clipboard.push_back (working.notes[i]);
+            return true;
+        }
+        if (clipboard.empty())
+            return true;
+        // Paste right after the copied notes, like duplicating them
+        double first = 1.0e9, last = 0.0;
+        for (const auto& n : clipboard)
+        {
+            first = std::min (first, n.start);
+            last = std::max (last, n.end());
+        }
+        const double s = snap() > 0.0 ? snap() : 0.25;
+        const double offset = std::ceil ((last - first) / s - 1.0e-9) * s;
+        selected.assign (working.notes.size(), false);
+        double furthest = working.lengthBeats;
+        for (auto n : clipboard)
+        {
+            n.start += offset;
+            working.notes.push_back (n);
+            selected.push_back (true);
+            furthest = std::max (furthest, n.end());
+        }
+        // Grow the pattern (in whole bars) so pasted notes aren't lost off the end
+        const double bar = barBeats (proc.doc().timeSig);
+        working.lengthBeats = std::ceil (furthest / bar - 1.0e-9) * bar;
+        clipboard.clear();
+        for (size_t i = 0; i < working.notes.size(); ++i)
+            if (selected[i])
+                clipboard.push_back (working.notes[i]);
+        commit (true);
+        return true;
+    }
+    if (key.isKeyCode (juce::KeyPress::upKey) || key.isKeyCode (juce::KeyPress::downKey) || key.isKeyCode (juce::KeyPress::leftKey)
+        || key.isKeyCode (juce::KeyPress::rightKey))
+    {
+        bool any = false;
+        const int dRow = key.isKeyCode (juce::KeyPress::upKey) ? 1 : key.isKeyCode (juce::KeyPress::downKey) ? -1 : 0;
+        const double s = snap() > 0.0 ? snap() : 0.25;
+        const double dBeat = key.isKeyCode (juce::KeyPress::rightKey) ? s : key.isKeyCode (juce::KeyPress::leftKey) ? -s : 0.0;
+        for (size_t i = 0; i < working.notes.size(); ++i)
+            if (selected[i])
+            {
+                auto& n = working.notes[i];
+                n.chop = juce::jlimit (0, numRows() - 1, n.chop + dRow);
+                n.start = juce::jlimit (0.0, working.lengthBeats - 1.0e-3, n.start + dBeat);
+                any = true;
+            }
+        if (any)
+            commit (true);
+        return any;
+    }
+    return false;
+}
+
+} // namespace choplab

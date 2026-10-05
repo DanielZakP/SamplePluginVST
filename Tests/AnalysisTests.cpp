@@ -259,6 +259,7 @@ void analyseFile (const juce::File& file)
 int downloadModelCommand (int model);
 int printLyricsCommand (const juce::File& file, const juce::String& lang, int model);
 int lyricsTestCommand (const juce::File& fixtures, int model);
+int lyricsSnapTest (const juce::File& fixtures);
 
 int main (int argc, char** argv)
 {
@@ -324,6 +325,9 @@ int main (int argc, char** argv)
     testChordLoop (90.0, true);
     testWaltz();
     testOffsetNonLoop();
+
+    if (const auto fixtures = juce::File::getCurrentWorkingDirectory().getChildFile ("Tests/fixtures"); fixtures.isDirectory())
+        failures += lyricsSnapTest (fixtures);
 
     std::cout << "\n" << (failures == 0 ? "ALL PASSED" : juce::String (failures) + " FAILED") << "\n";
     return failures == 0 ? 0 : 1;

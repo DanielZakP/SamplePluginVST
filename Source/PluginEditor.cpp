@@ -28,7 +28,9 @@ ChopLabEditor::ChopLabEditor (ChopLabProcessor& p)
       midiDrag ("Drag MIDI pattern", [this] { return proc.writeMidiPattern (proc.getDragFolder()); }),
       table (p),
       inspector (p, [this] (int i) { return exportChop (i); }),
-      globalPanel (p)
+      globalPanel (p),
+      lyricsCard (p),
+      patternView (p)
 {
     setWantsKeyboardFocus (true);
 
@@ -156,14 +158,28 @@ ChopLabEditor::ChopLabEditor (ChopLabProcessor& p)
     table.onChopClicked = [this] (int i) { selectAndPlay (i); };
     addAndMakeVisible (inspector);
     addAndMakeVisible (globalPanel);
+    addAndMakeVisible (lyricsCard);
+    addChildComponent (patternView);
+
+    for (auto* tab : { &chopsTab, &rollTab })
+    {
+        tab->setClickingTogglesState (false);
+        tab->setConnectedEdges (tab == &chopsTab ? juce::Button::ConnectedOnRight : juce::Button::ConnectedOnLeft);
+        addAndMakeVisible (*tab);
+    }
+    chopsTab.setTooltip ("Waveform, chop list and chop settings");
+    rollTab.setTooltip ("Piano roll where every row is a chop, with its label and lyrics. Drag the result into FL");
+    chopsTab.onClick = [this] { showPage (0); };
+    rollTab.onClick = [this] { showPage (1); };
 
     // Last, so every child (including slider text boxes created in member constructors) picks it up.
     setLookAndFeel (&lnf);
 
     proc.addChangeListener (this);
     setResizable (true, true);
-    setResizeLimits (1100, 720, 2600, 1700);
-    setSize (1280, 800);
+    setResizeLimits (1180, 740, 2600, 1700);
+    setSize (1360, 820);
+    showPage (proc.currentPage);
     refresh();
     startTimerHz (8);
 }
@@ -205,9 +221,10 @@ void ChopLabEditor::refresh()
     modeTransients.setToggleState (mode == ChopMode::transients, juce::dontSendNotification);
     modeGrid.setToggleState (mode == ChopMode::grid, juce::dontSendNotification);
     modeManual.setToggleState (mode == ChopMode::manual, juce::dontSendNotification);
-    sensitivity.setVisible (mode == ChopMode::transients);
-    minGap.setVisible (mode == ChopMode::transients);
-    gridBox.setVisible (mode == ChopMode::grid);
+    const bool chopsPage = proc.currentPage == 0;
+    sensitivity.setVisible (chopsPage && mode == ChopMode::transients);
+    minGap.setVisible (chopsPage && mode == ChopMode::transients);
+    gridBox.setVisible (chopsPage && mode == ChopMode::grid);
     sensitivity.setValue (d.chop.sensitivity, juce::dontSendNotification);
     minGap.setValue (d.chop.minLengthMs, juce::dontSendNotification);
     int gridId = 3;
@@ -227,6 +244,27 @@ void ChopLabEditor::refresh()
     table.documentChanged();
     inspector.documentChanged();
     globalPanel.documentChanged();
+    lyricsCard.documentChanged();
+    patternView.documentChanged();
+    repaint();
+}
+
+void ChopLabEditor::showPage (int page)
+{
+    proc.currentPage = page;
+    const bool chops = page == 0;
+    for (auto* c : std::initializer_list<juce::Component*> { &waveform, &modeTransients, &modeGrid, &modeManual, &playAllButton,
+                                                             &stopButton, &exportButton, &midiDrag, &table, &inspector, &globalPanel })
+        c->setVisible (chops);
+    const auto mode = proc.doc().chop.mode;
+    sensitivity.setVisible (chops && mode == ChopMode::transients);
+    minGap.setVisible (chops && mode == ChopMode::transients);
+    gridBox.setVisible (chops && mode == ChopMode::grid);
+    patternView.setVisible (! chops);
+    chopsTab.setToggleState (chops, juce::dontSendNotification);
+    rollTab.setToggleState (! chops, juce::dontSendNotification);
+    if (! chops)
+        patternView.grabKeyboardFocus();
     repaint();
 }
 
@@ -309,6 +347,11 @@ bool ChopLabEditor::keyPressed (const juce::KeyPress& key)
     const int sel = proc.selectedSlice;
     const int count = (int) d.slices.size();
 
+    if (key == juce::KeyPress::spaceKey && proc.currentPage == 1)
+    {
+        proc.playPattern (! proc.isPatternPlaying());
+        return true;
+    }
     if (key == juce::KeyPress::spaceKey)
     {
         if (sel >= 0)
@@ -508,6 +551,8 @@ void ChopLabEditor::paint (juce::Graphics& g)
     }
 
     paintCards (g);
+    if (proc.currentPage != 0)
+        return;
 
     // Chop bar
     g.setColour (theme::panel);
@@ -555,8 +600,11 @@ void ChopLabEditor::resized()
         redoButton.setBounds (h.removeFromRight (58));
         h.removeFromRight (4);
         undoButton.setBounds (h.removeFromRight (58));
+        h.removeFromRight (16);
+        rollTab.setBounds (h.removeFromRight (96));
+        chopsTab.setBounds (h.removeFromRight (80));
         h.removeFromRight (12);
-        statusArea = h.removeFromRight (juce::jmin (520, h.getWidth() / 2));
+        statusArea = h.removeFromRight (juce::jmin (420, h.getWidth() / 2));
     }
 
     r.reduce (10, 10);
@@ -564,12 +612,14 @@ void ChopLabEditor::resized()
     {
         auto c = cards;
         const int gap = 10;
-        const int w = (c.getWidth() - 3 * gap) / 4;
+        const int w = (c.getWidth() - 4 * gap) / 5;
         tempoCard = c.removeFromLeft (w);
         c.removeFromLeft (gap);
         keyCard = c.removeFromLeft (w);
         c.removeFromLeft (gap);
         timeCard = c.removeFromLeft (w);
+        c.removeFromLeft (gap);
+        lyricsCard.setBounds (c.removeFromLeft (w + 40));
         c.removeFromLeft (gap);
         projectCard = c;
 
@@ -582,8 +632,10 @@ void ChopLabEditor::resized()
         timeSigBox.setBounds (timeCard.reduced (12, 0).withTrimmedTop (24).withHeight (28).withWidth (140));
     }
     r.removeFromTop (10);
+    pageArea = r;
+    patternView.setBounds (r);
 
-    const int bottomH = juce::jlimit (270, 340, r.getHeight() * 2 / 5);
+    const int bottomH = juce::jlimit (280, 340, r.getHeight() * 2 / 5);
     auto bottom = r.removeFromBottom (bottomH);
     r.removeFromBottom (10);
     chopBar = r.removeFromBottom (44);
@@ -625,7 +677,7 @@ void ChopLabEditor::resized()
         gridBox.setBounds (gridArea.removeFromLeft (140));
     }
 
-    globalPanel.setBounds (bottom.removeFromRight (330));
+    globalPanel.setBounds (bottom.removeFromRight (310));
     bottom.removeFromRight (10);
     inspector.setBounds (bottom.removeFromRight (380));
     bottom.removeFromRight (10);

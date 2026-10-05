@@ -4,20 +4,25 @@
 namespace choplab
 {
 
+// Double-click-to-edit cell for a chop's label or lyrics.
 class SliceTable::LabelCell : public juce::Label
 {
 public:
-    explicit LabelCell (SliceTable& o) : owner (o)
+    LabelCell (SliceTable& o, bool lyrics) : owner (o), isLyrics (lyrics)
     {
         setEditable (false, true, false);
         setFont (theme::font (13.5f));
-        setColour (juce::Label::textColourId, theme::text);
         setMinimumHorizontalScale (1.0f);
         onTextChange = [this]
         {
             auto& p = owner.proc;
             if (row < 0 || row >= (int) p.doc().slices.size())
                 return;
+            if (isLyrics)
+            {
+                p.setSliceLyrics (row, getText());
+                return;
+            }
             auto s = p.doc().slices[(size_t) row].settings;
             s.label = getText().trim();
             p.setSliceSettings (row, s);
@@ -27,10 +32,21 @@ public:
     void setRow (int r)
     {
         row = r;
-        const auto& slices = owner.proc.doc().slices;
-        const auto label = r >= 0 && r < (int) slices.size() ? slices[(size_t) r].settings.label : juce::String();
-        setText (label, juce::dontSendNotification);
-        setTooltip ("Double-click to name this chop");
+        const auto& d = owner.proc.doc();
+        const bool valid = r >= 0 && r < (int) d.slices.size();
+        if (isLyrics)
+        {
+            setText (valid ? d.lyricsFor (r) : juce::String(), juce::dontSendNotification);
+            // Detected words are dimmer than ones you typed
+            setColour (juce::Label::textColourId, valid && d.slices[(size_t) r].settings.lyricsEdited ? theme::text : theme::textDim);
+            setTooltip (valid && ! getText().isEmpty() ? getText() + "\n(double-click to fix the words)" : "Double-click to type the words in this chop");
+        }
+        else
+        {
+            setText (valid ? d.slices[(size_t) r].settings.label : juce::String(), juce::dontSendNotification);
+            setColour (juce::Label::textColourId, theme::text);
+            setTooltip ("Double-click to name this chop");
+        }
     }
 
     void paint (juce::Graphics& g) override
@@ -39,7 +55,7 @@ public:
         {
             g.setColour (theme::textFaint);
             g.setFont (getFont());
-            g.drawText ("add label", getLocalBounds().reduced (4, 0), juce::Justification::centredLeft, true);
+            g.drawText (isLyrics ? "-" : "add label", getLocalBounds().reduced (4, 0), juce::Justification::centredLeft, true);
             return;
         }
         juce::Label::paint (g);
@@ -48,12 +64,15 @@ public:
     void mouseDown (const juce::MouseEvent& e) override
     {
         owner.table.selectRow (row);
-        owner.cellClicked (row, colLabel, e);
+        owner.cellClicked (row, isLyrics ? colLyrics : colLabel, e);
         juce::Label::mouseDown (e);
     }
 
+    bool lyricsCell() const { return isLyrics; }
+
 private:
     SliceTable& owner;
+    const bool isLyrics;
     int row = -1;
 };
 
@@ -69,15 +88,16 @@ SliceTable::SliceTable (ChopLabProcessor& p) : proc (p)
 
     auto& h = table.getHeader();
     const int columnFlags = juce::TableHeaderComponent::visible | juce::TableHeaderComponent::resizable;
-    h.addColumn ("#", colIndex, 36, 28, 60, columnFlags);
-    h.addColumn ("Note", colNote, 50, 40, 80, columnFlags);
-    h.addColumn ("Label", colLabel, 124, 70, 400, columnFlags);
-    h.addColumn ("Pos", colBar, 60, 46, 120, columnFlags);
-    h.addColumn ("On", colOn, 76, 56, 140, columnFlags);
-    h.addColumn ("Beats", colLength, 54, 44, 120, columnFlags);
-    h.addColumn ("Type", colType, 84, 56, 140, columnFlags);
-    h.addColumn ("Chord", colHarmony, 56, 44, 100, columnFlags);
-    h.addColumn ("Edits", colEdits, 96, 50, 400, columnFlags);
+    h.addColumn ("#", colIndex, 34, 28, 60, columnFlags);
+    h.addColumn ("Note", colNote, 46, 40, 80, columnFlags);
+    h.addColumn ("Label", colLabel, 104, 60, 400, columnFlags);
+    h.addColumn ("Lyrics", colLyrics, 120, 60, 600, columnFlags);
+    h.addColumn ("Pos", colBar, 56, 44, 120, columnFlags);
+    h.addColumn ("On", colOn, 70, 52, 140, columnFlags);
+    h.addColumn ("Beats", colLength, 48, 40, 120, columnFlags);
+    h.addColumn ("Type", colType, 76, 50, 140, columnFlags);
+    h.addColumn ("Chord", colHarmony, 60, 48, 100, columnFlags);
+    h.addColumn ("Edits", colEdits, 80, 44, 400, columnFlags);
     h.setStretchToFitActive (true);
     h.setPopupMenuActive (false);
 }
@@ -213,16 +233,17 @@ void SliceTable::paintCell (juce::Graphics& g, int row, int column, int width, i
 
 juce::Component* SliceTable::refreshComponentForCell (int row, int column, bool, juce::Component* existing)
 {
-    if (column != colLabel)
+    if (column != colLabel && column != colLyrics)
     {
         jassert (existing == nullptr);
         return nullptr;
     }
+    const bool lyrics = column == colLyrics;
     auto* cell = dynamic_cast<LabelCell*> (existing);
-    if (cell == nullptr)
+    if (cell == nullptr || cell->lyricsCell() != lyrics)
     {
         delete existing;
-        cell = new LabelCell (*this);
+        cell = new LabelCell (*this, lyrics);
     }
     if (! cell->isBeingEdited())
         cell->setRow (row);

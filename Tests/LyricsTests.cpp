@@ -171,7 +171,7 @@ int lyricsTestCommand (const juce::File& fixtures, int model)
         if (mode.timing == kDefaultLyricsTiming)
         {
             expect (matched >= 7, "most words recognised");
-            expect (matched > 0 && sumErr / matched < 0.15 && maxErr < 0.35, "word start times are close");
+            expect (matched > 0 && sumErr / matched < 0.1 && maxErr < 0.3, "word start times are close");
         }
     }
 
@@ -201,4 +201,65 @@ int lyricsTestCommand (const juce::File& fixtures, int model)
 
     std::cout << "\n" << (lyricFailures == 0 ? "ALL PASSED" : juce::String (lyricFailures) + " FAILED") << "\n";
     return lyricFailures == 0 ? 0 : 1;
+}
+
+// No model needed: whisper's raw word times on words_en.wav (recorded from a CI run of the fast
+// model) are snapped to the speech onsets and compared with the true word starts.
+int lyricsSnapTest (const juce::File& fixtures)
+{
+    std::cout << "Lyric word snapping (recorded whisper timings)\n";
+    juce::AudioBuffer<float> audio;
+    double rate = 0;
+    if (! readWav (fixtures.getChildFile ("words_en.wav"), audio, rate))
+    {
+        expect (false, "words_en.wav loads");
+        return 1;
+    }
+    const auto onsets = speechOnsets (audio, rate);
+    std::cout << "  speech onsets:";
+    for (auto t : onsets)
+        std::cout << " " << juce::String (t, 2);
+    std::cout << "\n";
+
+    const std::vector<std::pair<const char*, double>> raw { { "Hello", 0.51 }, { "world,", 0.80 }, { "this", 1.92 }, { "is", 2.56 },
+                                                            { "a", 2.88 },     { "test,", 3.04 },  { "we", 3.84 },   { "chop", 4.06 },
+                                                            { "samples", 4.51 }, { "to", 5.30 },   { "hide.", 5.52 } };
+    std::vector<LyricWord> words;
+    for (const auto& r : raw)
+        words.push_back ({ r.first, r.second, r.second + 0.2, 1.0f });
+    snapWordsToOnsets (words, onsets);
+
+    juce::StringArray truthLines;
+    truthLines.addLines (fixtures.getChildFile ("words_en.txt").loadFileAsString());
+    double sumBefore = 0, sumAfter = 0, worstAfter = 0;
+    int n = 0;
+    for (const auto& line : truthLines)
+    {
+        const auto word = line.upToFirstOccurrenceOf (" ", false, false);
+        const double truth = line.fromFirstOccurrenceOf (" ", false, false).getDoubleValue();
+        for (size_t i = 0; i < words.size(); ++i)
+            if (norm (words[i].text) == word)
+            {
+                sumBefore += std::abs (raw[i].second - truth);
+                const double err = std::abs (words[i].start - truth);
+                sumAfter += err;
+                worstAfter = std::max (worstAfter, err);
+                ++n;
+                std::cout << "  " << word << ": " << juce::String (raw[i].second, 2) << " -> " << juce::String (words[i].start, 2)
+                          << " (actual " << juce::String (truth, 2) << ")\n";
+            }
+    }
+    std::cout << "  mean error " << juce::String (sumBefore / juce::jmax (1, n), 3) << " s -> " << juce::String (sumAfter / juce::jmax (1, n), 3)
+              << " s, worst " << juce::String (worstAfter, 3) << " s\n";
+    expect (n >= 8 && sumAfter / n < 0.06 && worstAfter < 0.2, "snapping lands words on their real starts");
+    bool ordered = true;
+    for (size_t i = 1; i < words.size(); ++i)
+        ordered = ordered && words[i].start > words[i - 1].start;
+    expect (ordered, "words stay in order");
+
+    // Nothing to snap to: estimates are left alone
+    std::vector<LyricWord> untouched { { "a", 1.0, 1.2, 1.0f }, { "b", 2.0, 2.2, 1.0f } };
+    snapWordsToOnsets (untouched, { 5.0, 6.0 });
+    expect (std::abs (untouched[0].start - 1.0) < 1.0e-9 && std::abs (untouched[1].start - 2.0) < 1.0e-9, "far-away onsets are ignored");
+    return lyricFailures;
 }

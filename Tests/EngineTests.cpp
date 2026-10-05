@@ -101,9 +101,56 @@ juce::File writeLoop (double bpm)
 }
 } // namespace
 
+// Builds a ready-made project for screenshots: a sample, a few labels, lyrics words from a text
+// file ("seconds word" per line) and the piano roll filled from the sample's order.
+static int writeDemoState (const juce::File& audio, const juce::File& wordsFile, const juce::File& settingsOut)
+{
+    ChopLabProcessor p;
+    p.prepareToPlay (kRate, 512);
+    p.loadFile (audio);
+    if (! waitFor ([&] { return ! p.isAnalysing() && p.doc().hasSample(); }))
+        return 1;
+    p.fillPatternFromSample();
+    auto s0 = p.doc().slices[0].settings;
+    s0.label = "kick";
+    p.setSliceSettings (0, s0);
+
+    juce::MemoryBlock state;
+    p.getStateInformation (state);
+    auto tree = juce::ValueTree::readFromData (state.getData(), state.getSize());
+    auto lyrics = tree.getChildWithName ("Lyrics");
+    lyrics.setProperty ("language", "en", nullptr);
+    lyrics.setProperty ("searched", true, nullptr);
+    juce::StringArray lines;
+    lines.addLines (wordsFile.loadFileAsString());
+    for (int i = 0; i < lines.size(); ++i)
+    {
+        if (lines[i].trim().isEmpty())
+            continue;
+        const double t = lines[i].upToFirstOccurrenceOf (" ", false, false).getDoubleValue();
+        const double next = i + 1 < lines.size() && lines[i + 1].trim().isNotEmpty() ? lines[i + 1].getDoubleValue() : t + 0.4;
+        juce::ValueTree w ("W");
+        w.setProperty ("t", lines[i].fromFirstOccurrenceOf (" ", false, false).trim(), nullptr);
+        w.setProperty ("s", t, nullptr);
+        w.setProperty ("e", juce::jmin (next, t + 0.5), nullptr);
+        lyrics.appendChild (w, nullptr);
+    }
+    juce::MemoryOutputStream out;
+    tree.writeToStream (out);
+    juce::PropertiesFile::Options o;
+    juce::PropertiesFile props (settingsOut, o);
+    props.setValue ("filterState", out.getMemoryBlock().toBase64Encoding());
+    return props.saveIfNeeded() ? 0 : 1;
+}
+
 int main (int argc, char** argv)
 {
     juce::ScopedJuceInitialiser_GUI init;
+    if (argc > 4 && juce::String (argv[1]) == "--demo-state")
+    {
+        auto f = [] (const char* path) { return juce::File::getCurrentWorkingDirectory().getChildFile (path); };
+        return writeDemoState (f (argv[2]), f (argv[3]), f (argv[4]));
+    }
     const auto fixtures = juce::File::getCurrentWorkingDirectory().getChildFile (argc > 1 ? argv[1] : "Tests/fixtures");
 
     FixedPlayHead playHead;

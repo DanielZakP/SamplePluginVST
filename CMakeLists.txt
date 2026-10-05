@@ -116,7 +116,9 @@ target_sources(ChopLab PRIVATE
     Source/PluginEditor.cpp
     Source/UI/WaveformView.cpp
     Source/UI/SliceTable.cpp
-    Source/UI/Panels.cpp)
+    Source/UI/Panels.cpp
+    Source/UI/LyricsCard.cpp
+    Source/UI/PatternView.cpp)
 
 target_include_directories(ChopLab PRIVATE Source ${SIGNALSMITH_STRETCH_DIR}/.. ${SIGNALSMITH_LINEAR_PARENT})
 target_compile_definitions(ChopLab PUBLIC ${CHOPLAB_COMMON_DEFINITIONS} JUCE_VST3_CAN_REPLACE_VST2=0)
@@ -158,7 +160,9 @@ if(CHOPLAB_BUILD_TESTS)
         Source/PluginEditor.cpp
         Source/UI/WaveformView.cpp
         Source/UI/SliceTable.cpp
-        Source/UI/Panels.cpp)
+        Source/UI/Panels.cpp
+        Source/UI/LyricsCard.cpp
+        Source/UI/PatternView.cpp)
     target_include_directories(ChopLabEngineTests PRIVATE Source Tests ${SIGNALSMITH_STRETCH_DIR}/.. ${SIGNALSMITH_LINEAR_PARENT})
     target_compile_definitions(ChopLabEngineTests PRIVATE ${CHOPLAB_COMMON_DEFINITIONS}
         JUCE_STANDALONE_APPLICATION=1 JUCE_MODAL_LOOPS_PERMITTED=1 JucePlugin_Name="ChopLab")

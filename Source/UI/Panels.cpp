@@ -27,7 +27,7 @@ SliceInspector::SliceInspector (ChopLabProcessor& p, std::function<juce::File (i
       release ("RELEASE", 1.0, 2000.0, 15.0, 0.1, millis, 120.0)
 {
     label.setFont (theme::font (15.0f));
-    label.setTextToShowWhenEmpty ("Name this chop (e.g. \"kick\", \"vocal: oh yeah\")", theme::textFaint);
+    label.setTextToShowWhenEmpty ("Label (e.g. kick, vox)", theme::textFaint);
     label.setIndents (8, 6);
     label.setSelectAllWhenFocused (true);
     label.onReturnKey = [this] { push(); getParentComponent()->grabKeyboardFocus(); };
@@ -40,6 +40,21 @@ SliceInspector::SliceInspector (ChopLabProcessor& p, std::function<juce::File (i
         getParentComponent()->grabKeyboardFocus();
     };
     addAndMakeVisible (label);
+
+    lyrics.setFont (theme::font (15.0f));
+    lyrics.setTextToShowWhenEmpty ("Lyrics", theme::textFaint);
+    lyrics.setIndents (8, 6);
+    lyrics.setSelectAllWhenFocused (true);
+    lyrics.setTooltip ("Words in this chop. Filled in by Find lyrics; type here to fix them");
+    lyrics.onReturnKey = [this] { pushLyrics(); getParentComponent()->grabKeyboardFocus(); };
+    lyrics.onFocusLost = [this] { pushLyrics(); };
+    lyrics.onEscapeKey = [this]
+    {
+        if (showingValidChop())
+            lyrics.setText (proc.doc().lyricsFor (shown), juce::dontSendNotification);
+        getParentComponent()->grabKeyboardFocus();
+    };
+    addAndMakeVisible (lyrics);
 
     for (auto* k : { &pitch, &speed, &gain, &attack, &release })
     {
@@ -123,15 +138,23 @@ void SliceInspector::push()
     proc.setSliceSettings (i, s);
 }
 
+void SliceInspector::pushLyrics()
+{
+    if (showingValidChop() && lyrics.getText().trim() != proc.doc().lyricsFor (shown))
+        proc.setSliceLyrics (shown, lyrics.getText());
+}
+
 void SliceInspector::documentChanged()
 {
     const auto& d = proc.doc();
     const int i = proc.selectedSlice;
     if (i != shown && label.hasKeyboardFocus (false))
         push(); // keep a label that was typed but not confirmed
+    if (i != shown && lyrics.hasKeyboardFocus (false))
+        pushLyrics();
     const bool valid = i >= 0 && i < (int) d.slices.size();
 
-    for (auto* c : std::initializer_list<juce::Component*> { &label, &pitch, &speed, &gain, &attack, &release, &keepPitch, &reverse,
+    for (auto* c : std::initializer_list<juce::Component*> { &label, &lyrics, &pitch, &speed, &gain, &attack, &release, &keepPitch, &reverse,
                                                              &playButton, &barOneButton, &resetButton, &dragWav })
         c->setEnabled (valid);
 
@@ -140,6 +163,11 @@ void SliceInspector::documentChanged()
         const auto& s = d.slices[(size_t) i].settings;
         if (! label.hasKeyboardFocus (false) || i != shown)
             label.setText (s.label, juce::dontSendNotification);
+        if (! lyrics.hasKeyboardFocus (false) || i != shown)
+        {
+            lyrics.setText (d.lyricsFor (i), juce::dontSendNotification);
+            lyrics.applyColourToAllText (s.lyricsEdited ? theme::text : theme::textDim);
+        }
         pitch.setValue (s.pitch);
         speed.setValue (s.speed);
         gain.setValue (s.gainDb);
@@ -151,6 +179,7 @@ void SliceInspector::documentChanged()
     else
     {
         label.setText ({}, juce::dontSendNotification);
+        lyrics.setText ({}, juce::dontSendNotification);
     }
     shown = i;
     repaint();
@@ -228,7 +257,10 @@ void SliceInspector::resized()
     headerArea = top;
 
     r.removeFromTop (6);
-    label.setBounds (r.removeFromTop (30));
+    auto fields = r.removeFromTop (30);
+    label.setBounds (fields.removeFromLeft (fields.getWidth() * 2 / 5));
+    fields.removeFromLeft (6);
+    lyrics.setBounds (fields);
     r.removeFromTop (6);
     infoArea = r.removeFromTop (38);
     r.removeFromTop (4);
