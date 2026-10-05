@@ -69,7 +69,15 @@ jobs:
         run: cmake -B build -A x64
 
       - name: Build
-        run: cmake --build build --config Release --target ChopLab_VST3 ChopLabTests ChopLabHostTests ChopLabEngineTests --parallel
+        shell: pwsh
+        run: |
+          cmake --build build --config Release --target ChopLab_VST3 ChopLabTests ChopLabHostTests ChopLabEngineTests --parallel 2>&1 | Tee-Object -FilePath build.txt
+          if ($LASTEXITCODE -ne 0) {
+            $errors = (Select-String -Path build.txt -Pattern "error C|error LNK|error MSB|fatal error" | Select-Object -First 25 | ForEach-Object { $_.Line.Trim() }) -join "`n"
+            $errors = $errors.Replace("%", "%25").Replace("`r", "").Replace("`n", "%0A")
+            Write-Output "::error title=build errors::$errors"
+            exit 1
+          }
 
       - name: Analysis tests (tempo, key, time signature, chop points)
         run: build/ChopLabTests_artefacts/Release/ChopLabTests.exe
