@@ -219,7 +219,7 @@ struct Abort
 } // namespace
 
 LyricsResult transcribeLyrics (const juce::AudioBuffer<float>& audio, double sampleRate, int modelIndex,
-                               const juce::String& languageCode, const LyricsProgress& progress)
+                               const juce::String& languageCode, const LyricsProgress& progress, LyricsTiming timing)
 {
     LyricsResult result;
     silenceLogs();
@@ -265,6 +265,11 @@ LyricsResult transcribeLyrics (const juce::AudioBuffer<float>& audio, double sam
     params.n_threads = juce::jlimit (1, 8, juce::SystemStats::getNumCpus() - 1);
     params.print_progress = params.print_realtime = params.print_special = params.print_timestamps = false;
     params.token_timestamps = true;
+    if (timing == LyricsTiming::wordSegments)
+    {
+        params.max_len = 1;
+        params.split_on_word = true;
+    }
     params.no_context = true;
     params.suppress_blank = true;
     params.suppress_nst = true;
@@ -355,7 +360,11 @@ LyricsResult transcribeLyrics (const juce::AudioBuffer<float>& audio, double sam
                 flush();
             if (bytes.empty())
             {
-                const auto t0 = data.t_dtw >= 0 ? data.t_dtw : data.t0;
+                auto t0 = data.t0;
+                if (timing == LyricsTiming::alignment && data.t_dtw >= 0)
+                    t0 = data.t_dtw;
+                else if (timing == LyricsTiming::wordSegments)
+                    t0 = whisper_full_get_segment_t0 (ctx, s);
                 word.start = (double) t0 / 100.0;
             }
             bytes += piece;

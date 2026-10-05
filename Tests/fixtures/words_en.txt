@@ -1,0 +1,10 @@
+hello 0.5
+world 1.11
+this 1.733
+is 2.26
+a 2.75
+test 3.191
+we 3.716
+chop 4.213
+samples 4.711
+tonight 5.474

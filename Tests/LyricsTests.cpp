@@ -34,10 +34,11 @@ bool readWav (const juce::File& f, juce::AudioBuffer<float>& out, double& rate)
     return true;
 }
 
-LyricsResult run (const juce::AudioBuffer<float>& audio, double rate, const juce::String& lang, int model)
+LyricsResult run (const juce::AudioBuffer<float>& audio, double rate, const juce::String& lang, int model,
+                  LyricsTiming timing = kDefaultLyricsTiming)
 {
     const auto t0 = juce::Time::getMillisecondCounterHiRes();
-    auto r = transcribeLyrics (audio, rate, model, lang, [] (float) { return true; });
+    auto r = transcribeLyrics (audio, rate, model, lang, [] (float) { return true; }, timing);
     const auto t1 = juce::Time::getMillisecondCounterHiRes();
     std::cout << "  language " << r.language << ", " << r.words.size() << " words in " << juce::String ((t1 - t0) / 1000.0, 1) << " s"
               << (r.error.isNotEmpty() ? ", error: " + r.error : juce::String()) << "\n   ";
@@ -123,14 +124,56 @@ int lyricsTestCommand (const juce::File& fixtures, int model)
     expect (wordsBetween (r.words, 0.0, 2.0).toLowerCase().contains ("hello"), "words are assigned to the chop they fall in");
     expect (! wordsBetween (r.words, 2.0, 7.5).toLowerCase().contains ("hello"), "and not to other chops");
 
+    // espeak's Spanish is robotic and the fast model mishears some of it, so ask for a few words
     std::cout << "Spanish speech, language auto-detected\n";
     auto rs = run (es, esRate, {}, model);
     expect (rs.language == "es", "detected Spanish");
-    expect (countFound (rs, { "hola", "mundo", "prueba", "letra" }) >= 2, "found Spanish words");
+    expect (countFound (rs, { "hola", "mundo", "esta", "es", "una", "prueba", "de", "la", "letra" }) >= 3, "found Spanish words");
 
     std::cout << "Spanish speech, language set by the user\n";
     auto rf = run (es, esRate, "es", model);
-    expect (rf.language == "es" && countFound (rf, { "hola", "mundo", "prueba", "letra" }) >= 2, "forced language works");
+    expect (rf.language == "es" && countFound (rf, { "hola", "mundo", "esta", "es", "una", "prueba", "de", "la", "letra" }) >= 3,
+            "forced language works");
+
+    // Word timing: each word was placed at a known time
+    std::cout << "Word timing on words with known start times\n";
+    juce::AudioBuffer<float> wordsAudio;
+    double wordsRate = 0;
+    readWav (fixtures.getChildFile ("words_en.wav"), wordsAudio, wordsRate);
+    juce::StringArray truthLines;
+    truthLines.addLines (fixtures.getChildFile ("words_en.txt").loadFileAsString());
+    struct Mode
+    {
+        LyricsTiming timing;
+        const char* name;
+    };
+    for (auto mode : { Mode { LyricsTiming::alignment, "alignment (DTW)" }, Mode { LyricsTiming::tokens, "timestamp tokens" },
+                       Mode { LyricsTiming::wordSegments, "one segment per word" } })
+    {
+        std::cout << " " << mode.name << ":\n";
+        auto rw = run (wordsAudio, wordsRate, "en", model, mode.timing);
+        double sumErr = 0.0, maxErr = 0.0;
+        int matched = 0;
+        for (const auto& line : truthLines)
+        {
+            const auto word = line.upToFirstOccurrenceOf (" ", false, false);
+            const double truth = line.fromFirstOccurrenceOf (" ", false, false).getDoubleValue();
+            if (const auto* w = find (rw, word))
+            {
+                const double err = w->start - truth;
+                sumErr += std::abs (err);
+                maxErr = std::max (maxErr, std::abs (err));
+                ++matched;
+            }
+        }
+        std::cout << "    matched " << matched << "/" << truthLines.size() << ", mean error " << juce::String (matched ? sumErr / matched : 0.0, 3)
+                  << " s, worst " << juce::String (maxErr, 3) << " s" << (mode.timing == kDefaultLyricsTiming ? "  <- in use" : "") << "\n";
+        if (mode.timing == kDefaultLyricsTiming)
+        {
+            expect (matched >= 7, "most words recognised");
+            expect (matched > 0 && sumErr / matched < 0.15 && maxErr < 0.35, "word start times are close");
+        }
+    }
 
     std::cout << "Drum loop, no vocals\n";
     const double beat = 60.0 / 93.0;

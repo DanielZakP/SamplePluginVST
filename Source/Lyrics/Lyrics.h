@@ -53,9 +53,19 @@ struct LyricsResult
     bool cancelled = false;
 };
 
+// How word start times are worked out (the tests compare them on speech with known timing).
+enum class LyricsTiming
+{
+    alignment,  // cross-attention alignment (DTW) per token
+    tokens,     // whisper's timestamp-token interpolation
+    wordSegments // one segment per word
+};
+constexpr LyricsTiming kDefaultLyricsTiming = LyricsTiming::alignment;
+
 // Transcribes with word timestamps. languageCode empty = detect. Blocking.
 LyricsResult transcribeLyrics (const juce::AudioBuffer<float>& audio, double sampleRate, int modelIndex,
-                               const juce::String& languageCode, const LyricsProgress&);
+                               const juce::String& languageCode, const LyricsProgress&,
+                               LyricsTiming timing = kDefaultLyricsTiming);
 
 // Words whose middle falls inside [startSeconds, endSeconds), joined with spaces.
 juce::String wordsBetween (const std::vector<LyricWord>&, double startSeconds, double endSeconds);
