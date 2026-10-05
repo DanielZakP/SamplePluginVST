@@ -93,7 +93,9 @@ file(GLOB DEMUCS_SOURCES ${DEMUCS_DIR}/src/*.cpp)
 add_library(choplab_demucs STATIC Source/Stems/Demucs.cpp ${DEMUCS_SOURCES})
 target_include_directories(choplab_demucs PRIVATE ${DEMUCS_DIR}/src)
 target_include_directories(choplab_demucs SYSTEM PRIVATE ${EIGEN_DIR})
-target_compile_definitions(choplab_demucs PRIVATE EIGEN_MPL2_ONLY)
+# demucs.cpp sizes tensors with Eigen::array<int, N>; with Eigen's default 64-bit index MSVC can't
+# match those to Tensor::resize. Nothing else in ChopLab uses Eigen, and no buffer comes near 2^31.
+target_compile_definitions(choplab_demucs PRIVATE EIGEN_MPL2_ONLY EIGEN_DEFAULT_DENSE_INDEX_TYPE=int)
 if(MSVC)
     target_compile_options(choplab_demucs PRIVATE /arch:AVX2 /bigobj)
     set_source_files_properties(${DEMUCS_SOURCES} PROPERTIES COMPILE_OPTIONS "/W0")
