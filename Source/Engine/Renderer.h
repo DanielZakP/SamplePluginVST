@@ -56,6 +56,7 @@ struct PlaybackData : juce::ReferenceCountedObject
 struct RenderRequest
 {
     std::shared_ptr<const SampleData> sample;
+    std::shared_ptr<const StemSet> stems; // for chops set to play a stem
     std::vector<Slice> slices;
     GlobalSettings global;
     double hostTempoRatio = 1.0;
@@ -78,7 +79,8 @@ public:
 private:
     void run() override;
     bool renderPass (const RenderRequest&);
-    std::shared_ptr<const juce::AudioBuffer<float>> renderCached (const RenderRequest&, juce::int64 start, juce::int64 end,
+    std::shared_ptr<const juce::AudioBuffer<float>> renderCached (const std::shared_ptr<const SampleData>&, double targetRate,
+                                                                  juce::int64 start, juce::int64 end,
                                                                   const Processing&, std::map<juce::uint64, std::shared_ptr<const juce::AudioBuffer<float>>>& used);
 
     Publish publish;

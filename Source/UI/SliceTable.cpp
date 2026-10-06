@@ -141,18 +141,23 @@ int SliceTable::getNumRows()
 void SliceTable::paintRowBackground (juce::Graphics& g, int row, int width, int height, bool selected)
 {
     if (selected)
-        g.fillAll (theme::sliceColour (row).withAlpha (0.16f));
+        g.fillAll (theme::accent.withAlpha (0.14f));
     else if (row % 2 == 1)
-        g.fillAll (theme::panelRaised.withAlpha (0.45f));
-    g.setColour (theme::sliceColour (row));
-    g.fillRect (0, 3, 3, height - 6);
-    g.setColour (theme::outline.withAlpha (0.5f));
+        g.fillAll (juce::Colours::white.withAlpha (0.025f));
+    if (selected)
+    {
+        g.setColour (theme::accent);
+        g.fillRect (0, 0, 2, height);
+    }
+    g.setColour (theme::edge.withAlpha (0.7f));
     g.drawHorizontalLine (height - 1, 0.0f, (float) width);
 }
 
 juce::String SliceTable::editsSummary (const SliceSettings& s)
 {
     juce::StringArray parts;
+    if (s.stem >= 0)
+        parts.add (stemName (s.stem).toLowerCase() + " only");
     if (std::abs (s.pitch) > 0.005f)
         parts.add ((s.pitch > 0 ? "+" : "") + juce::String (s.pitch, std::abs (s.pitch - std::round (s.pitch)) < 0.005f ? 0 : 2) + " st");
     if (std::abs (s.speed - 1.0f) > 0.001f)
@@ -202,16 +207,16 @@ void SliceTable::paintCell (juce::Graphics& g, int row, int column, int width, i
     const auto text = cellText (row, column);
     const auto& d = proc.doc();
     juce::Colour c = theme::text;
-    juce::Font f = theme::font (13.5f);
+    juce::Font f = theme::font (12.5f);
 
     if (column == colIndex)
     {
-        f = theme::font (13.0f, true);
-        c = theme::sliceColour (row);
+        f = theme::mono (12.0f);
+        c = row == proc.selectedSlice ? theme::text : theme::textDim;
     }
     else if (column == colNote || column == colBar)
     {
-        f = theme::mono (13.0f);
+        f = theme::mono (12.0f);
         c = theme::textDim;
     }
     else if (column == colOn)
@@ -219,7 +224,7 @@ void SliceTable::paintCell (juce::Graphics& g, int row, int column, int width, i
         const auto p = row < (int) d.slices.size() ? d.gridPosition (d.slices[(size_t) row].start) : GridPosition {};
         c = ! p.onGrid ? theme::textFaint : p.describe == "Bar start" ? theme::accent : p.sixteenth == 1 ? theme::text : theme::textDim;
         if (p.describe == "Bar start")
-            f = theme::font (13.5f, true);
+            f = theme::font (12.5f, true);
     }
     else if (column == colEdits || column == colLength || column == colHarmony || column == colType)
     {

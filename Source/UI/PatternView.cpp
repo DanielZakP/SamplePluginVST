@@ -15,7 +15,27 @@ struct Choice
 const Choice kSnaps[] { { "None", 0.0 }, { "1/32", 0.125 }, { "1/16", 0.25 }, { "1/8", 0.5 }, { "1/4 (beat)", 1.0 },
                         { "1/2", 2.0 },  { "Bar", -1.0 },   { "1/16 triplet", 1.0 / 6.0 }, { "1/8 triplet", 1.0 / 3.0 } };
 const int kBars[] { 1, 2, 4, 8, 16, 32, 64 };
-constexpr int kHeaderWidth = 250;
+constexpr int kHeaderWidth = 260;
+constexpr float kTrackHeight = 5.0f; // the start slider along the bottom of each note
+
+bool isBlackKey (int note)
+{
+    const int n = (note % 12 + 12) % 12;
+    return n == 1 || n == 3 || n == 6 || n == 8 || n == 10;
+}
+
+juce::String shortStemName (int stem)
+{
+    switch (stem)
+    {
+        case stemVocals: return "Vox";
+        case stemDrums: return "Drums";
+        case stemBass: return "Bass";
+        case stemOther: return "Other";
+        case stemInstrumental: return "Inst";
+        default: return "Mix";
+    }
+}
 constexpr int kRulerHeight = 20;
 constexpr int kVelocityHeight = 60;
 constexpr int kScroll = 10;
@@ -38,7 +58,6 @@ PatternView::PatternView (ChopLabProcessor& p)
         p2.notes.clear();
         proc.setPattern (p2);
     };
-    dragMidi.setTooltip ("Drag into FL's piano roll or playlist. The notes play the same chops on this channel");
     dragMidi.onClick = [this]
     {
         if (auto f = proc.writePatternMidi (proc.getDragFolder()); f.existsAsFile())
@@ -98,11 +117,12 @@ void PatternView::documentChanged()
         selected.resize (working.notes.size(), false);
     }
 
-    const int sampleId = (int) (juce::pointer_sized_int) d.sample.get();
+    const int sampleId = (int) (juce::pointer_sized_int) d.mix().get();
     if (sampleId != lastSample)
     {
         lastSample = sampleId;
         fittedForSample = false;
+        peaks.clear();
     }
     if (! fittedForSample && getWidth() > 0)
     {
@@ -135,6 +155,11 @@ void PatternView::documentChanged()
     for (auto* c : std::initializer_list<juce::Component*> { &playButton, &stopButton, &fillButton, &clearButton, &lengthBox, &snapBox })
         c->setEnabled (has);
     dragMidi.setEnabled (has && ! working.notes.empty());
+    bool anyOffset = false;
+    for (const auto& n : working.notes)
+        anyOffset = anyOffset || n.offset > 0.0;
+    dragMidi.setTooltip (juce::String ("Drag into FL's piano roll or playlist. The notes play the same chops on this channel.")
+                         + (anyOffset ? " Start offsets stay behind: MIDI has no way to carry them, so in FL those notes start at the top of the chop." : ""));
     playButton.setToggleState (proc.isPatternPlaying(), juce::dontSendNotification);
     updateScrollbars();
     repaint();
@@ -150,18 +175,16 @@ void PatternView::resized()
         t.removeFromLeft (4);
         stopButton.setBounds (t.removeFromLeft (52));
         t.removeFromLeft (14);
-        lengthCaption = t.removeFromLeft (52);
+        lengthCaption = t.removeFromLeft (48);
         lengthBox.setBounds (t.removeFromLeft (90));
         t.removeFromLeft (10);
-        snapCaption = t.removeFromLeft (40);
+        snapCaption = t.removeFromLeft (36);
         snapBox.setBounds (t.removeFromLeft (110));
         t.removeFromLeft (14);
         fillButton.setBounds (t.removeFromLeft (172));
         t.removeFromLeft (4);
         clearButton.setBounds (t.removeFromLeft (56));
         dragMidi.setBounds (t.removeFromRight (150));
-        t.removeFromRight (12);
-        hintArea = t.withTrimmedLeft (12);
     }
 
     r.removeFromTop (8);
@@ -242,6 +265,91 @@ double PatternView::defaultLength (int chop) const
     return juce::jmax (s, std::round (len / s) * s);
 }
 
+juce::Rectangle<float> PatternView::offsetTrack (juce::Rectangle<float> note) const
+{
+    return note.withTrimmedTop (note.getHeight() - kTrackHeight).withTrimmedRight (juce::jmin (6.0f, note.getWidth() * 0.25f));
+}
+
+bool PatternView::onOffsetTrack (int note, juce::Point<float> p) const
+{
+    if (note < 0 || note >= (int) working.notes.size())
+        return false;
+    const auto r = noteBounds (working.notes[(size_t) note]);
+    return r.getWidth() >= 14.0f && offsetTrack (r).expanded (0.0f, 1.0f).contains (p);
+}
+
+juce::Rectangle<float> PatternView::stemTag (int chop) const
+{
+    const float y = yForChop (chop) - (float) gridArea.getY() + (float) headerArea.getY();
+    return { (float) headerArea.getRight() - 50.0f, y + 4.0f, 42.0f, rowHeight - 8.0f };
+}
+
+void PatternView::showStemMenu (int chop)
+{
+    const auto& d = proc.doc();
+    if (chop < 0 || chop >= (int) d.slices.size())
+        return;
+    const int current = d.slices[(size_t) chop].settings.stem;
+    const bool haveStems = d.stems != nullptr;
+    const auto phase = proc.getStemsStatus().phase;
+    const bool separating = phase == ChopLabProcessor::StemsStatus::downloading || phase == ChopLabProcessor::StemsStatus::separating;
+
+    juce::PopupMenu m;
+    m.addSectionHeader ("Chop " + juce::String (chop + 1) + " plays");
+    m.addItem (1, "Same as the sample (" + (d.source >= 0 ? stemName (d.source).toLowerCase() : juce::String ("full mix")) + ")", true, current < 0);
+    m.addSeparator();
+    for (int i = 0; i < kNumStems; ++i)
+        m.addItem (10 + i, stemName (i) + " only", haveStems, current == i);
+    if (! haveStems)
+    {
+        m.addSeparator();
+        m.addItem (2, separating ? "Separating stems..." : "Separate stems", ! separating);
+    }
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea (localAreaToGlobal (stemTag (chop).toNearestInt())),
+                     [safe = juce::Component::SafePointer<PatternView> (this), chop] (int result)
+                     {
+                         if (safe == nullptr || result == 0)
+                             return;
+                         auto& pr = safe->proc;
+                         if (result == 2)
+                         {
+                             pr.separateStems();
+                             return;
+                         }
+                         if (chop >= (int) pr.doc().slices.size())
+                             return;
+                         auto settings = pr.doc().slices[(size_t) chop].settings;
+                         settings.stem = result >= 10 ? result - 10 : -1;
+                         pr.setSliceSettings (chop, settings);
+                     });
+}
+
+const PatternView::Peaks& PatternView::peaksFor (const std::shared_ptr<const SampleData>& source)
+{
+    for (const auto& p : peaks)
+        if (p.source == source)
+            return p;
+    if (peaks.size() >= 8)
+        peaks.erase (peaks.begin());
+
+    Peaks p;
+    p.source = source;
+    const auto& a = source->audio;
+    const int n = a.getNumSamples();
+    p.level.assign ((size_t) ((n + kPeakBlock - 1) / kPeakBlock), 0.0f);
+    for (int c = 0; c < a.getNumChannels(); ++c)
+    {
+        const float* data = a.getReadPointer (c);
+        for (int i = 0; i < n; ++i)
+        {
+            auto& level = p.level[(size_t) (i / kPeakBlock)];
+            level = juce::jmax (level, std::abs (data[i]));
+        }
+    }
+    peaks.push_back (std::move (p));
+    return peaks.back();
+}
+
 void PatternView::fitToWidth()
 {
     const double len = juce::jmax (1.0, proc.doc().pattern.lengthBeats);
@@ -304,7 +412,7 @@ void PatternView::drawRows (juce::Graphics& g)
     const auto& d = proc.doc();
     g.saveState();
     g.reduceClipRegion (headerArea);
-    g.setColour (theme::panelRaised);
+    g.setColour (theme::panel);
     g.fillRect (headerArea);
 
     for (int chop = 0; chop < (int) d.slices.size(); ++chop)
@@ -313,36 +421,58 @@ void PatternView::drawRows (juce::Graphics& g)
         if (y + rowHeight < (float) headerArea.getY() || y > (float) headerArea.getBottom())
             continue;
         auto row = juce::Rectangle<float> ((float) headerArea.getX(), y, (float) headerArea.getWidth(), rowHeight);
-        const bool sel = chop == proc.selectedSlice;
-        if (sel)
-        {
-            g.setColour (theme::sliceColour (chop).withAlpha (0.18f));
-            g.fillRect (row);
-        }
-        g.setColour (theme::sliceColour (chop));
-        g.fillRect (row.removeFromLeft (4.0f).reduced (0.0f, 3.0f));
-        row.removeFromLeft (6.0f);
-
-        g.setFont (theme::font (12.5f, true));
-        g.drawText (juce::String (chop + 1), row.removeFromLeft (24.0f), juce::Justification::centredLeft);
-        g.setColour (theme::textDim);
-        g.setFont (theme::mono (12.0f));
         const int note = d.noteForSlice (chop);
-        g.drawText (note >= 0 ? midiNoteName (note) : juce::String ("-"), row.removeFromLeft (36.0f), juce::Justification::centredLeft);
+        if (chop == proc.selectedSlice)
+            g.setColour (theme::accent.withAlpha (0.16f));
+        else
+            g.setColour (isBlackKey (note) ? theme::panel.darker (0.18f) : theme::panel);
+        g.fillRect (row);
+        if (chop == proc.selectedSlice)
+        {
+            g.setColour (theme::accent);
+            g.fillRect (row.getX(), row.getY(), 2.0f, row.getHeight());
+        }
+        row.removeFromLeft (8.0f);
+
+        g.setColour (chop == proc.selectedSlice ? theme::text : theme::textDim);
+        g.setFont (theme::mono (12.0f));
+        g.drawText (juce::String (chop + 1), row.removeFromLeft (24.0f), juce::Justification::centredLeft);
+        g.setColour (theme::textFaint);
+        g.setFont (theme::mono (11.5f));
+        g.drawText (note >= 0 ? midiNoteName (note) : juce::String ("-"), row.removeFromLeft (34.0f), juce::Justification::centredLeft);
+
+        // Which stem this chop plays, at the end of the row
+        const auto tag = stemTag (chop);
+        row.setRight (tag.getX() - 4.0f);
+        const int own = d.slices[(size_t) chop].settings.stem;
+        if (own >= 0)
+        {
+            g.setColour (theme::inset);
+            g.fillRoundedRectangle (tag, 2.0f);
+            g.setColour (d.stems != nullptr ? theme::accent : theme::textFaint);
+            g.drawRoundedRectangle (tag.reduced (0.5f), 2.0f, 1.0f);
+            g.setFont (theme::font (11.5f));
+            g.drawText (shortStemName (own), tag, juce::Justification::centred, false);
+        }
+        else
+        {
+            g.setColour (theme::textFaint);
+            g.setFont (theme::font (11.5f));
+            g.drawText (shortStemName (d.source), tag, juce::Justification::centred, false);
+        }
 
         const auto& s = d.slices[(size_t) chop];
         const auto lyrics = d.lyricsFor (chop);
         juce::String main = s.settings.label.isNotEmpty() ? s.settings.label : s.info.type;
         g.setColour (s.settings.label.isNotEmpty() ? theme::text : theme::textDim);
-        g.setFont (theme::font (13.0f, s.settings.label.isNotEmpty()));
-        const float mainW = juce::jmin (row.getWidth() * 0.45f, (float) juce::GlyphArrangement::getStringWidthInt (g.getCurrentFont(), main) + 8.0f);
+        g.setFont (theme::font (12.5f));
+        const float mainW = juce::jmin (row.getWidth() * 0.5f, (float) juce::GlyphArrangement::getStringWidthInt (g.getCurrentFont(), main) + 8.0f);
         g.drawText (main, row.removeFromLeft (mainW), juce::Justification::centredLeft, true);
         if (lyrics.isNotEmpty())
         {
-            g.setColour (theme::warn.withAlpha (0.9f));
-            g.setFont (theme::font (12.5f));
-            g.drawText (juce::String (juce::CharPointer_UTF8 ("\xe2\x80\x9c")) + lyrics + juce::String (juce::CharPointer_UTF8 ("\xe2\x80\x9d")), row.reduced (2.0f, 0.0f),
-                        juce::Justification::centredLeft, true);
+            g.setColour (theme::warn);
+            g.setFont (theme::font (12.0f));
+            g.drawText (lyrics, row.reduced (2.0f, 0.0f), juce::Justification::centredLeft, true);
         }
         else if (s.info.harmony.isNotEmpty())
         {
@@ -350,37 +480,46 @@ void PatternView::drawRows (juce::Graphics& g)
             g.setFont (theme::font (12.0f));
             g.drawText (s.info.harmony, row.reduced (2.0f, 0.0f), juce::Justification::centredLeft, true);
         }
-        g.setColour (theme::outline.withAlpha (0.6f));
+        g.setColour (theme::edge.withAlpha (0.6f));
         g.drawHorizontalLine ((int) (y + rowHeight) - 1, (float) headerArea.getX(), (float) headerArea.getRight());
     }
     g.restoreState();
-    g.setColour (theme::outline);
+    g.setColour (theme::edge);
     g.drawVerticalLine (headerArea.getRight() - 1, (float) headerArea.getY(), (float) headerArea.getBottom());
 }
 
 void PatternView::drawGrid (juce::Graphics& g)
 {
     const auto& d = proc.doc();
-    g.setColour (theme::panel);
+    g.setColour (theme::inset);
     g.fillRect (gridArea);
 
-    // Row shading, tinted by chop colour
+    // Rows shaded like keys, as in FL's piano roll
     for (int chop = 0; chop < (int) d.slices.size(); ++chop)
     {
         const float y = yForChop (chop);
         if (y + rowHeight < (float) gridArea.getY() || y > (float) gridArea.getBottom())
             continue;
-        g.setColour (chop == proc.selectedSlice ? theme::sliceColour (chop).withAlpha (0.10f)
-                                                : (chop % 2 == 0 ? theme::panel : theme::panelRaised.withAlpha (0.5f)));
-        g.fillRect ((float) gridArea.getX(), y, (float) gridArea.getWidth(), rowHeight);
+        const auto row = juce::Rectangle<float> ((float) gridArea.getX(), y, (float) gridArea.getWidth(), rowHeight);
+        g.setColour (isBlackKey (d.noteForSlice (chop)) ? theme::inset : theme::inset.brighter (0.06f));
+        g.fillRect (row);
+        if (chop == proc.selectedSlice)
+        {
+            g.setColour (theme::accent.withAlpha (0.06f));
+            g.fillRect (row);
+        }
+        g.setColour (theme::edge.withAlpha (0.5f));
+        g.drawHorizontalLine ((int) (y + rowHeight) - 1, row.getX(), row.getRight());
     }
 
+    g.setColour (theme::panel);
+    g.fillRect (rulerArea);
     const double bar = barBeats (d.timeSig);
     const double unit = 4.0 / juce::jmax (1, d.timeSig.denominator);
     const double first = juce::jmax (0.0, std::floor (scrollBeats));
     const double last = xToBeat ((float) gridArea.getRight());
     const double step = pxPerBeat * 0.25 >= 7.0 ? 0.25 : pxPerBeat * unit >= 7.0 ? unit : bar;
-    g.setFont (theme::font (11.0f));
+    g.setFont (theme::mono (11.0f));
     for (double b = std::floor (first / step) * step; b <= last; b += step)
     {
         const float x = beatToX (b);
@@ -389,7 +528,7 @@ void PatternView::drawGrid (juce::Graphics& g)
         const double inBar = std::fmod (b + 1.0e-9, bar);
         const bool isBar = inBar < 1.0e-6;
         const bool isBeat = std::fmod (b + 1.0e-9, unit) < 1.0e-6;
-        g.setColour (isBar ? theme::outline.brighter (0.4f) : isBeat ? theme::outline : theme::outline.withAlpha (0.35f));
+        g.setColour (isBar ? juce::Colour (0xff4a4f57) : isBeat ? juce::Colour (0xff30343a) : juce::Colour (0xff22252a));
         g.drawVerticalLine ((int) x, (float) gridArea.getY(), (float) gridArea.getBottom());
         g.drawVerticalLine ((int) x, (float) velocityArea.getY(), (float) velocityArea.getBottom());
         if (isBar)
@@ -397,6 +536,12 @@ void PatternView::drawGrid (juce::Graphics& g)
             g.setColour (theme::textDim);
             g.drawText (juce::String ((int) std::round (b / bar) + 1), (int) x + 3, rulerArea.getY(), 40, rulerArea.getHeight(),
                         juce::Justification::centredLeft, false);
+            g.drawVerticalLine ((int) x, (float) rulerArea.getY() + 4.0f, (float) rulerArea.getBottom());
+        }
+        else if (isBeat)
+        {
+            g.setColour (theme::textFaint);
+            g.drawVerticalLine ((int) x, (float) rulerArea.getBottom() - 4.0f, (float) rulerArea.getBottom());
         }
     }
 
@@ -404,11 +549,54 @@ void PatternView::drawGrid (juce::Graphics& g)
     const float endX = beatToX (working.lengthBeats);
     if (endX < (float) gridArea.getRight())
     {
-        g.setColour (theme::background.withAlpha (0.6f));
+        g.setColour (juce::Colours::black.withAlpha (0.45f));
         g.fillRect (juce::Rectangle<float> (endX, (float) gridArea.getY(), (float) gridArea.getRight() - endX, (float) gridArea.getHeight()));
-        g.setColour (theme::accent.withAlpha (0.7f));
+        g.setColour (theme::accent.withAlpha (0.6f));
         g.drawVerticalLine ((int) endX, (float) rulerArea.getY(), (float) gridArea.getBottom());
     }
+}
+
+void PatternView::drawNoteWave (juce::Graphics& g, const PatternNote& n, juce::Rectangle<float> r)
+{
+    const auto& d = proc.doc();
+    const auto& slice = d.slices[(size_t) n.chop];
+    const auto source = d.audioFor (slice);
+    if (source == nullptr || source->audio.getNumSamples() == 0)
+        return;
+    const auto& level = peaksFor (source).level;
+    const auto how = proc.chopProcessing (n.chop);
+    // Played seconds -> source samples, from the note's start offset
+    const double perSecond = how.speed * source->sampleRate;
+    const double secondsPerBeat = 60.0 / juce::jmax (1.0, proc.getHostBpm());
+    const double chopLength = (double) (slice.end - slice.start);
+
+    // Scaled to the chop's own loudest point, like an audio clip in FL's playlist
+    float chopPeak = 0.0f;
+    for (auto k = slice.start / kPeakBlock; k <= slice.end / kPeakBlock && k < (juce::int64) level.size(); ++k)
+        chopPeak = juce::jmax (chopPeak, level[(size_t) k]);
+    const float scale = 1.0f / juce::jmax (0.05f, chopPeak);
+
+    const auto area = r.withTrimmedBottom (kTrackHeight).reduced (1.0f, 1.5f);
+    const float mid = area.getCentreY(), half = area.getHeight() * 0.5f;
+    const float left = juce::jmax (area.getX(), (float) gridArea.getX()), right = juce::jmin (area.getRight(), (float) gridArea.getRight());
+    juce::RectangleList<float> bars;
+    for (float x = left; x < right; x += 1.0f)
+    {
+        const double p0 = (n.offset + (xToBeat (x) - n.start) * secondsPerBeat) * perSecond;
+        const double p1 = (n.offset + (xToBeat (x + 1.0f) - n.start) * secondsPerBeat) * perSecond;
+        if (p0 >= chopLength)
+            break;
+        double a = juce::jmax (0.0, p0), b = juce::jmin (chopLength, juce::jmax (p0 + 1.0, p1));
+        if (how.reverse)
+            std::tie (a, b) = std::make_pair (chopLength - b, chopLength - a);
+        const int b0 = (int) ((slice.start + (juce::int64) a) / kPeakBlock), b1 = (int) ((slice.start + (juce::int64) b) / kPeakBlock);
+        float peak = 0.0f;
+        for (int k = juce::jmax (0, b0); k <= b1 && k < (int) level.size(); ++k)
+            peak = juce::jmax (peak, level[(size_t) k]);
+        const float h = juce::jmax (0.5f, juce::jmin (1.0f, peak * scale) * half);
+        bars.addWithoutMerging ({ x, mid - h, 1.0f, h * 2.0f });
+    }
+    g.fillRectList (bars);
 }
 
 void PatternView::drawNotes (juce::Graphics& g)
@@ -424,16 +612,56 @@ void PatternView::drawNotes (juce::Graphics& g)
         if (r.getRight() < (float) gridArea.getX() || r.getX() > (float) gridArea.getRight())
             continue;
         const bool sel = i < selected.size() && selected[i];
-        const auto c = theme::sliceColour (n.chop);
-        g.setColour (c.withAlpha (0.45f + 0.55f * n.velocity).brighter (sel ? 0.25f : 0.0f));
-        g.fillRoundedRectangle (r, 3.0f);
-        g.setColour (sel ? theme::text : c.darker (0.5f));
-        g.drawRoundedRectangle (r.reduced (0.5f), 3.0f, sel ? 1.5f : 1.0f);
+        auto fill = theme::wave.darker (0.75f * (1.0f - n.velocity));
+        if (sel)
+            fill = fill.brighter (0.3f);
+        g.setColour (fill);
+        g.fillRoundedRectangle (r, 2.0f);
+
+        g.setColour (juce::Colours::black.withAlpha (0.32f));
+        drawNoteWave (g, n, r);
+
         if (r.getWidth() > 18.0f)
         {
             g.setColour (juce::Colours::black.withAlpha (0.85f));
+            g.setFont (theme::font (11.5f));
+            g.drawText (noteText (n.chop), r.withTrimmedBottom (kTrackHeight).reduced (4.0f, 0.0f), juce::Justification::centredLeft, true);
+        }
+
+        // Start slider: how far into the chop this note begins
+        if (r.getWidth() >= 14.0f)
+        {
+            const auto track = offsetTrack (r);
+            g.setColour (juce::Colours::black.withAlpha (0.35f));
+            g.fillRect (track);
+            if (n.offset > 0.0)
+            {
+                const double length = juce::jmax (1.0e-3, proc.chopPlaySeconds (n.chop));
+                const float x = track.getX() + (float) juce::jlimit (0.0, 1.0, n.offset / length) * track.getWidth();
+                g.setColour (theme::accent);
+                g.fillRect (track.withRight (x));
+                g.setColour (theme::text);
+                g.fillRect (x - 1.0f, track.getY() - 1.0f, 2.0f, track.getHeight() + 1.0f);
+            }
+        }
+
+        g.setColour (sel ? theme::text : theme::edge);
+        g.drawRoundedRectangle (r.reduced (0.5f), 2.0f, sel ? 1.5f : 1.0f);
+
+        if (drag == Drag::offset && (int) i == grabbedNote)
+        {
+            const auto readout = "starts " + juce::String (n.offset, 3) + " s in";
             g.setFont (theme::font (12.0f));
-            g.drawText (noteText (n.chop), r.reduced (5.0f, 0.0f), juce::Justification::centredLeft, true);
+            const float w = (float) juce::GlyphArrangement::getStringWidthInt (g.getCurrentFont(), readout) + 12.0f;
+            auto box = juce::Rectangle<float> (r.getX(), r.getY() - 22.0f, w, 18.0f);
+            if (box.getY() < (float) gridArea.getY())
+                box.setY (r.getBottom() + 4.0f);
+            g.setColour (theme::panelRaised);
+            g.fillRoundedRectangle (box, 2.0f);
+            g.setColour (theme::edge);
+            g.drawRoundedRectangle (box.reduced (0.5f), 2.0f, 1.0f);
+            g.setColour (theme::text);
+            g.drawText (readout, box, juce::Justification::centred, false);
         }
     }
 
@@ -456,9 +684,9 @@ void PatternView::drawNotes (juce::Graphics& g)
 
 void PatternView::drawVelocity (juce::Graphics& g)
 {
-    g.setColour (theme::panelRaised);
+    g.setColour (theme::inset);
     g.fillRect (velocityArea);
-    g.setColour (theme::outline);
+    g.setColour (theme::edge);
     g.drawHorizontalLine (velocityArea.getY(), (float) velocityArea.getX(), (float) velocityArea.getRight());
     g.saveState();
     g.reduceClipRegion (velocityArea);
@@ -469,39 +697,36 @@ void PatternView::drawVelocity (juce::Graphics& g)
         const float x = beatToX (n.start);
         const float barH = h * n.velocity;
         const bool sel = i < selected.size() && selected[i];
-        g.setColour (theme::sliceColour (n.chop).withAlpha (sel ? 1.0f : 0.7f));
-        g.fillRect (x, (float) velocityArea.getBottom() - barH - 2.0f, 3.0f, barH);
-        g.fillEllipse (x - 2.0f, (float) velocityArea.getBottom() - barH - 4.0f, 7.0f, 7.0f);
+        g.setColour (sel ? theme::accent : theme::wave.withAlpha (0.8f));
+        g.fillRect (x, (float) velocityArea.getBottom() - barH - 2.0f, 2.0f, barH);
+        g.fillRect (x - 2.0f, (float) velocityArea.getBottom() - barH - 3.0f, 6.0f, 2.0f);
     }
     g.restoreState();
 }
 
 void PatternView::paint (juce::Graphics& g)
 {
-    g.setColour (theme::panel);
-    g.fillRoundedRectangle (toolbar.toFloat(), 8.0f);
+    theme::drawPanel (g, toolbar.toFloat());
     g.setColour (theme::textDim);
-    g.setFont (theme::font (11.0f, true));
-    g.drawText ("LENGTH", lengthCaption, juce::Justification::centredLeft);
-    g.drawText ("SNAP", snapCaption, juce::Justification::centredLeft);
     g.setFont (theme::font (12.0f));
-    g.drawText ("Click: add   Right-click: delete   Drag edge: resize   Ctrl+drag: select", hintArea, juce::Justification::centredLeft, true);
+    g.drawText ("Length", lengthCaption, juce::Justification::centredLeft);
+    g.drawText ("Snap", snapCaption, juce::Justification::centredLeft);
 
-    g.setColour (theme::panelRaised);
-    g.fillRect (rulerArea.withLeft (headerArea.getX()));
+    g.setColour (theme::panel);
+    g.fillRect (rulerArea.withLeft (headerArea.getX()).withRight (headerArea.getRight()));
     g.setColour (theme::textDim);
-    g.setFont (theme::font (11.0f, true));
-    g.drawText ("CHOP / NOTE / LABEL / LYRICS", rulerArea.withLeft (headerArea.getX() + 8).withWidth (kHeaderWidth - 8),
-                juce::Justification::centredLeft);
-    g.drawText ("VELOCITY", velocityArea.withX (headerArea.getX() + 8).withWidth (kHeaderWidth - 8), juce::Justification::centredLeft);
+    g.setFont (theme::font (12.0f));
+    g.drawText ("Chop", rulerArea.withLeft (headerArea.getX() + 8).withWidth (kHeaderWidth - 8), juce::Justification::centredLeft);
+    g.drawText ("Stem", rulerArea.withLeft (headerArea.getRight() - 50).withWidth (42), juce::Justification::centred);
+    g.drawText ("Velocity", velocityArea.withX (headerArea.getX() + 8).withWidth (kHeaderWidth - 8), juce::Justification::centredLeft);
 
     if (! proc.doc().hasSample())
     {
-        g.setColour (theme::panel);
+        g.setColour (theme::inset);
         g.fillRect (gridArea.getUnion (headerArea));
         g.setColour (theme::textDim);
-        g.setFont (theme::font (16.0f));
-        g.drawText ("Load a sample first", gridArea.getUnion (headerArea), juce::Justification::centred);
+        g.setFont (theme::font (14.0f));
+        g.drawText ("No sample loaded", gridArea.getUnion (headerArea), juce::Justification::centred);
         return;
     }
 
@@ -512,10 +737,9 @@ void PatternView::paint (juce::Graphics& g)
 
     if (working.notes.empty())
     {
-        g.setColour (theme::textDim);
-        g.setFont (theme::font (15.0f));
-        g.drawFittedText ("Click in the grid to place chops,\nor press \"Start from sample order\" to lay out the original.",
-                          gridArea.reduced (20), juce::Justification::centred, 3);
+        g.setColour (theme::textFaint);
+        g.setFont (theme::font (13.0f));
+        g.drawText ("Empty pattern", gridArea, juce::Justification::centred);
     }
 }
 
@@ -552,8 +776,14 @@ void PatternView::mouseMove (const juce::MouseEvent& e)
     {
         const int n = noteAt (p);
         const bool edge = n >= 0 && p.x > noteBounds (working.notes[(size_t) n]).getRight() - 6.0f;
-        setMouseCursor (edge ? juce::MouseCursor::LeftRightResizeCursor : n >= 0 ? juce::MouseCursor::DraggingHandCursor
-                                                                                 : juce::MouseCursor::NormalCursor);
+        setMouseCursor (edge || onOffsetTrack (n, p) ? juce::MouseCursor::LeftRightResizeCursor
+                        : n >= 0                     ? juce::MouseCursor::DraggingHandCursor
+                                                     : juce::MouseCursor::NormalCursor);
+    }
+    else if (headerArea.contains (p.toInt()))
+    {
+        const int chop = rowAtY (p.y);
+        setMouseCursor (chop >= 0 && stemTag (chop).contains (p) ? juce::MouseCursor::PointingHandCursor : juce::MouseCursor::NormalCursor);
     }
     else
     {
@@ -570,14 +800,17 @@ void PatternView::mouseDown (const juce::MouseEvent& e)
         return;
     const auto p = e.position;
 
-    // Row header: hear the chop
+    // Row header: hear the chop, or pick its stem
     if (headerArea.contains (p.toInt()))
     {
         const int chop = rowAtY (p.y - (float) headerArea.getY() + (float) gridArea.getY());
         if (chop >= 0)
         {
             proc.selectSlice (chop);
-            proc.previewSlice (chop);
+            if (e.mods.isPopupMenu() || stemTag (chop).contains (p))
+                showStemMenu (chop);
+            else
+                proc.previewSlice (chop);
         }
         return;
     }
@@ -600,6 +833,15 @@ void PatternView::mouseDown (const juce::MouseEvent& e)
     }
 
     const int hit = noteAt (p);
+    if (hit >= 0 && onOffsetTrack (hit, p))
+    {
+        grabbedNote = hit;
+        offsetAtGrab = working.notes[(size_t) hit].offset;
+        drag = Drag::offset;
+        proc.selectSlice (working.notes[(size_t) hit].chop);
+        repaint();
+        return;
+    }
     if (hit >= 0)
     {
         const auto& n = working.notes[(size_t) hit];
@@ -729,14 +971,63 @@ void PatternView::mouseDrag (const juce::MouseEvent& e)
             }
             break;
         }
+        case Drag::offset:
+        {
+            if (grabbedNote < 0 || grabbedNote >= (int) working.notes.size() || e.getDistanceFromDragStart() < 1)
+                return;
+            auto& n = working.notes[(size_t) grabbedNote];
+            // The slider runs the length of the note; its full travel is the whole chop. Shift for fine steps.
+            const double length = proc.chopPlaySeconds (n.chop);
+            const float width = juce::jmax (12.0f, offsetTrack (noteBounds (n)).getWidth());
+            const double moved = (double) (p.x - e.mouseDownPosition.x) / width * length * (e.mods.isShiftDown() ? 0.1 : 1.0);
+            n.offset = juce::jlimit (0.0, juce::jmax (0.0, length - 0.005), std::round ((offsetAtGrab + moved) * 1000.0) / 1000.0);
+            commit (! dragCommitted);
+            dragCommitted = true;
+            repaint();
+            break;
+        }
         case Drag::none:
         default:
             break;
     }
 }
 
+void PatternView::mouseDoubleClick (const juce::MouseEvent& e)
+{
+    const int hit = noteAt (e.position);
+    if (hit >= 0 && onOffsetTrack (hit, e.position) && working.notes[(size_t) hit].offset > 0.0)
+    {
+        working.notes[(size_t) hit].offset = 0.0;
+        commit (true);
+        proc.previewSlice (working.notes[(size_t) hit].chop);
+    }
+}
+
+juce::String PatternView::getTooltip()
+{
+    const auto p = getMouseXYRelative().toFloat();
+    if (gridArea.contains (p.toInt()))
+    {
+        const int hit = noteAt (p);
+        if (onOffsetTrack (hit, p))
+            return "Start: drag right to skip into the chop, for this note only. Shift for fine steps, double-click to reset";
+        return {};
+    }
+    if (headerArea.contains (p.toInt()))
+    {
+        const int chop = rowAtY (p.y);
+        if (chop >= 0 && stemTag (chop).contains (p))
+            return "Which stem this chop plays";
+        return chop >= 0 ? "Click to hear the chop, right-click to pick its stem" : juce::String();
+    }
+    return {};
+}
+
 void PatternView::mouseUp (const juce::MouseEvent&)
 {
+    // Let the new start be heard
+    if (drag == Drag::offset && dragCommitted && grabbedNote >= 0 && grabbedNote < (int) working.notes.size())
+        proc.previewSlice (working.notes[(size_t) grabbedNote].chop, working.notes[(size_t) grabbedNote].offset);
     drag = Drag::none;
     grabbedNote = -1;
     selectionBox = {};

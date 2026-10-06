@@ -20,13 +20,13 @@ SliceInspector::SliceInspector (ChopLabProcessor& p, std::function<juce::File (i
     : proc (p),
       exportChop (std::move (exporter)),
       dragWav ("Drag WAV", [this] { return exportChop (shown); }),
-      pitch ("PITCH", -24.0, 24.0, 0.0, 1.0, semitones),
-      speed ("SPEED", 0.25, 4.0, 1.0, 0.01, ratio, 1.0),
-      gain ("GAIN", -24.0, 12.0, 0.0, 0.1, decibels),
-      attack ("FADE IN", 0.0, 500.0, 0.0, 0.1, millis, 40.0),
-      release ("RELEASE", 1.0, 2000.0, 15.0, 0.1, millis, 120.0)
+      pitch ("Pitch", -24.0, 24.0, 0.0, 1.0, semitones),
+      speed ("Speed", 0.25, 4.0, 1.0, 0.01, ratio, 1.0),
+      gain ("Gain", -24.0, 12.0, 0.0, 0.1, decibels),
+      attack ("Fade in", 0.0, 500.0, 0.0, 0.1, millis, 40.0),
+      release ("Release", 1.0, 2000.0, 15.0, 0.1, millis, 120.0)
 {
-    label.setFont (theme::font (15.0f));
+    label.setFont (theme::font (13.5f));
     label.setTextToShowWhenEmpty ("Label (e.g. kick, vox)", theme::textFaint);
     label.setIndents (8, 6);
     label.setSelectAllWhenFocused (true);
@@ -41,7 +41,7 @@ SliceInspector::SliceInspector (ChopLabProcessor& p, std::function<juce::File (i
     };
     addAndMakeVisible (label);
 
-    lyrics.setFont (theme::font (15.0f));
+    lyrics.setFont (theme::font (13.5f));
     lyrics.setTextToShowWhenEmpty ("Lyrics", theme::textFaint);
     lyrics.setIndents (8, 6);
     lyrics.setSelectAllWhenFocused (true);
@@ -87,10 +87,21 @@ SliceInspector::SliceInspector (ChopLabProcessor& p, std::function<juce::File (i
     {
         if (! showingValidChop())
             return;
+        const auto& old = proc.doc().slices[(size_t) shown].settings;
         SliceSettings fresh;
-        fresh.label = proc.doc().slices[(size_t) shown].settings.label;
+        fresh.label = old.label;
+        fresh.lyrics = old.lyrics;
+        fresh.lyricsEdited = old.lyricsEdited;
+        fresh.stem = old.stem;
         proc.setSliceSettings (shown, fresh);
     };
+    stem.addItem ("Same as sample", 1);
+    for (int i = 0; i < kNumStems; ++i)
+        stem.addItem (stemName (i) + " only", i + 2);
+    stem.setTooltip ("Which stem this chop plays. Separate stems first (the Stems box at the top)");
+    stem.onChange = [this] { push(); };
+    addAndMakeVisible (stem);
+
     dragWav.setTooltip ("Drag this chop (with its pitch/speed/reverse) into FL's playlist or channel rack. Click to just save it");
     dragWav.onClick = [this] { exportChop (shown); };
     for (auto* b : { &playButton, &barOneButton, &resetButton })
@@ -117,6 +128,7 @@ SliceSettings SliceInspector::current() const
     s.releaseMs = (float) release.getValue();
     s.keepPitch = keepPitch.getToggleState();
     s.reverse = reverse.getToggleState();
+    s.stem = stem.getSelectedId() >= 2 ? stem.getSelectedId() - 2 : -1;
     return s;
 }
 
@@ -133,7 +145,7 @@ void SliceInspector::push()
     using juce::exactlyEqual;
     if (s.label == old.label && exactlyEqual (s.pitch, old.pitch) && exactlyEqual (s.speed, old.speed) && exactlyEqual (s.gainDb, old.gainDb)
         && exactlyEqual (s.attackMs, old.attackMs) && exactlyEqual (s.releaseMs, old.releaseMs) && s.keepPitch == old.keepPitch
-        && s.reverse == old.reverse)
+        && s.reverse == old.reverse && s.stem == old.stem)
         return;
     proc.setSliceSettings (i, s);
 }
@@ -155,8 +167,10 @@ void SliceInspector::documentChanged()
     const bool valid = i >= 0 && i < (int) d.slices.size();
 
     for (auto* c : std::initializer_list<juce::Component*> { &label, &lyrics, &pitch, &speed, &gain, &attack, &release, &keepPitch, &reverse,
-                                                             &playButton, &barOneButton, &resetButton, &dragWav })
+                                                             &playButton, &barOneButton, &resetButton, &dragWav, &stem })
         c->setEnabled (valid);
+    for (int k = 0; k < kNumStems; ++k)
+        stem.setItemEnabled (k + 2, d.stems != nullptr);
 
     if (valid)
     {
@@ -175,6 +189,7 @@ void SliceInspector::documentChanged()
         release.setValue (s.releaseMs);
         keepPitch.setToggleState (s.keepPitch, juce::dontSendNotification);
         reverse.setToggleState (s.reverse, juce::dontSendNotification);
+        stem.setSelectedId (s.stem >= 0 ? s.stem + 2 : 1, juce::dontSendNotification);
     }
     else
     {
@@ -187,8 +202,7 @@ void SliceInspector::documentChanged()
 
 void SliceInspector::paint (juce::Graphics& g)
 {
-    g.setColour (theme::panel);
-    g.fillRoundedRectangle (getLocalBounds().toFloat(), 8.0f);
+    theme::drawPanel (g, getLocalBounds().toFloat());
 
     const auto& d = proc.doc();
     const int i = proc.selectedSlice;
@@ -196,31 +210,27 @@ void SliceInspector::paint (juce::Graphics& g)
     if (i < 0 || i >= (int) d.slices.size())
     {
         g.setColour (theme::textDim);
-        g.setFont (theme::font (15.0f, true));
+        g.setFont (theme::font (14.0f));
         g.drawText ("No chop selected", h, juce::Justification::centredLeft);
         return;
     }
 
     const auto& s = d.slices[(size_t) i];
-    const auto colour = theme::sliceColour (i);
-    g.setColour (colour);
-    g.fillRoundedRectangle (h.removeFromLeft (6).toFloat().reduced (0, 4), 2.0f);
-    h.removeFromLeft (8);
     g.setColour (theme::text);
-    g.setFont (theme::font (17.0f, true));
+    g.setFont (theme::font (15.0f, true));
     const juce::String title = "Chop " + juce::String (i + 1);
     g.drawText (title, h, juce::Justification::centredLeft);
-    const int titleW = juce::GlyphArrangement::getStringWidthInt (theme::font (17.0f, true), title) + 10;
+    const int titleW = juce::GlyphArrangement::getStringWidthInt (theme::font (15.0f, true), title) + 10;
     const int note = d.noteForSlice (i);
     if (note >= 0)
     {
-        auto pill = h.withTrimmedLeft (titleW).withWidth (46).reduced (0, 6).toFloat();
-        g.setColour (theme::panelRaised);
-        g.fillRoundedRectangle (pill, 4.0f);
         g.setColour (theme::textDim);
-        g.setFont (theme::mono (12.5f));
-        g.drawText (midiNoteName (note), pill, juce::Justification::centred);
+        g.setFont (theme::mono (12.0f));
+        g.drawText (midiNoteName (note), h.withTrimmedLeft (titleW), juce::Justification::centredLeft);
     }
+    g.setColour (theme::textDim);
+    g.setFont (theme::font (12.0f));
+    g.drawText ("Plays", stemCaption, juce::Justification::centredRight);
 
     // Where it sits and what it is
     const auto pos = d.gridPosition (s.start);
@@ -235,12 +245,12 @@ void SliceInspector::paint (juce::Graphics& g)
     const double beats = d.lengthInBeats (s);
     juce::String what = juce::String (beats, 2) + " beats, " + juce::String (d.secondsAt (s.end - s.start), 2) + " s";
     if (s.info.type.isNotEmpty())
-        what << "  |  " << s.info.type;
+        what << "    " << s.info.type;
     if (s.info.harmony.isNotEmpty())
-        what << "  |  " << s.info.harmony;
+        what << "    " << s.info.harmony;
 
     auto info = infoArea;
-    g.setFont (theme::font (13.5f));
+    g.setFont (theme::font (12.5f));
     g.setColour (pos.describe == "Bar start" ? theme::accent : theme::text);
     g.drawText (where, info.removeFromTop (18), juce::Justification::centredLeft, true);
     g.setColour (theme::textDim);
@@ -263,6 +273,8 @@ void SliceInspector::resized()
     lyrics.setBounds (fields);
     r.removeFromTop (6);
     infoArea = r.removeFromTop (38);
+    stem.setBounds (infoArea.removeFromRight (124).withSizeKeepingCentre (124, 22));
+    stemCaption = infoArea.removeFromRight (44);
     r.removeFromTop (4);
 
     auto knobs = r.removeFromTop (88);
@@ -282,9 +294,9 @@ void SliceInspector::resized()
 //==============================================================================
 GlobalPanel::GlobalPanel (ChopLabProcessor& p)
     : proc (p),
-      pitch ("PITCH", -24.0, 24.0, 0.0, 1.0, semitones),
-      speed ("SPEED", 0.25, 4.0, 1.0, 0.01, ratio, 1.0),
-      volume ("VOLUME", -24.0, 12.0, 0.0, 0.1, decibels),
+      pitch ("Pitch", -24.0, 24.0, 0.0, 1.0, semitones),
+      speed ("Speed", 0.25, 4.0, 1.0, 0.01, ratio, 1.0),
+      volume ("Volume", -24.0, 12.0, 0.0, 0.1, decibels),
       dragFull ("Drag sample", [this] { return proc.renderFullToFile (proc.getDragFolder()); })
 {
     for (auto* k : { &pitch, &speed, &volume })
@@ -358,8 +370,7 @@ void GlobalPanel::documentChanged()
 
 void GlobalPanel::paint (juce::Graphics& g)
 {
-    g.setColour (theme::panel);
-    g.fillRoundedRectangle (getLocalBounds().toFloat(), 8.0f);
+    theme::drawPanel (g, getLocalBounds().toFloat());
     g.setColour (theme::text);
     g.setFont (theme::font (15.0f, true));
     g.drawText ("Whole sample", captionArea, juce::Justification::centredLeft);
@@ -370,14 +381,14 @@ void GlobalPanel::paint (juce::Graphics& g)
         const double ratio = proc.getHostBpm() / juce::jmax (1.0, d.bpm);
         g.setColour (theme::good);
         g.setFont (theme::font (12.5f));
-        g.drawText (juce::String (d.bpm, 1) + " to " + juce::String (proc.getHostBpm(), 1) + " BPM (" + juce::String (ratio, 2) + "x)",
+        g.drawText (juce::String (d.bpm, 1) + " > " + juce::String (proc.getHostBpm(), 1) + " BPM (" + juce::String (ratio, 2) + "x)",
                     captionArea.withTrimmedLeft (110), juce::Justification::centredLeft, true);
     }
 
     g.setColour (theme::textDim);
-    g.setFont (theme::font (11.0f, true));
-    g.drawText ("CHOP 1 ON", rootCaption, juce::Justification::centredLeft);
-    g.drawText ("NOTE LENGTH", triggerCaption, juce::Justification::centredLeft);
+    g.setFont (theme::font (12.0f));
+    g.drawText ("Chop 1 on", rootCaption, juce::Justification::centredLeft);
+    g.drawText ("Note length", triggerCaption, juce::Justification::centredLeft);
 }
 
 void GlobalPanel::resized()

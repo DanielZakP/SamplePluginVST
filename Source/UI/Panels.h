@@ -29,7 +29,8 @@ private:
     DragOutButton dragWav;
     Knob pitch, speed, gain, attack, release;
     juce::ToggleButton keepPitch { "Keep pitch" }, reverse { "Reverse" };
-    juce::Rectangle<int> headerArea, infoArea;
+    juce::ComboBox stem;
+    juce::Rectangle<int> headerArea, infoArea, stemCaption;
     int shown = -2;
 };
 

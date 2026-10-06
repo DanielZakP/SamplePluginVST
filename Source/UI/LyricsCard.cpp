@@ -90,16 +90,15 @@ juce::String LyricsCard::statusText (juce::Colour& colour) const
     switch (s.phase)
     {
         case ChopLabProcessor::LyricsStatus::downloading:
-            return "Downloading the speech model... " + percent;
+            return "Downloading model... " + percent;
         case ChopLabProcessor::LyricsStatus::transcribing:
             return "Listening... " + percent;
         case ChopLabProcessor::LyricsStatus::failed:
-            colour = juce::Colour (0xffff6b6b);
+            colour = theme::error;
             return s.message;
         case ChopLabProcessor::LyricsStatus::done:
             if (d.lyrics.words.empty())
                 return "No words found";
-            colour = theme::good;
             return lyricsLanguageName (d.lyrics.language) + ", " + juce::String (d.lyrics.words.size()) + " words";
         case ChopLabProcessor::LyricsStatus::idle:
         default:
@@ -108,20 +107,18 @@ juce::String LyricsCard::statusText (juce::Colour& colour) const
             if (! lyricsSupportedOnThisCpu())
                 return "Needs a CPU with AVX2";
             if (! lyricsModelFile (d.lyrics.model).existsAsFile())
-                return "First run downloads the model once";
-            return "Not searched yet";
+                return "Downloads " + juce::String (lyricsModels()[(size_t) d.lyrics.model].approxBytes / (1024 * 1024)) + " MB on first use";
+            return {};
     }
 }
 
 void LyricsCard::paint (juce::Graphics& g)
 {
-    g.setColour (theme::panel);
-    g.fillRoundedRectangle (getLocalBounds().toFloat(), 8.0f);
     drawCaption (g, captionArea, "Lyrics");
 
     juce::Colour colour;
     const auto text = statusText (colour);
-    setTooltip (text); // the status line is short; errors can be long
+    setTooltip (proc.getLyricsStatus().phase == ChopLabProcessor::LyricsStatus::failed ? text : juce::String()); // errors can be longer than the line
     const auto s = proc.getLyricsStatus();
     if (s.phase == ChopLabProcessor::LyricsStatus::downloading || s.phase == ChopLabProcessor::LyricsStatus::transcribing)
     {

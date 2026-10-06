@@ -106,7 +106,7 @@ juce::String StemsCard::statusText (juce::Colour& colour) const
     switch (s.phase)
     {
         case Status::downloading:
-            return "Downloading the stem model... " + percent;
+            return "Downloading model... " + percent;
         case Status::separating:
         {
             auto text = "Separating... " + percent;
@@ -116,11 +116,15 @@ juce::String StemsCard::statusText (juce::Colour& colour) const
             return text;
         }
         case Status::failed:
-            colour = juce::Colour (0xffff6b6b);
+            colour = theme::error;
             return s.message;
         case Status::done:
-            colour = theme::good;
-            return d.source >= 0 ? "Chops play the " + stemName (d.source).toLowerCase() + " only" : juce::String ("Pick a stem for the chops to play");
+        {
+            int own = 0;
+            for (const auto& slice : d.slices)
+                own += slice.settings.stem >= 0 ? 1 : 0;
+            return own > 0 ? juce::String (own) + (own == 1 ? " chop plays" : " chops play") + " its own stem" : juce::String();
+        }
         case Status::idle:
         default:
             if (! d.hasSample())
@@ -128,20 +132,18 @@ juce::String StemsCard::statusText (juce::Colour& colour) const
             if (! stemsSupportedOnThisCpu())
                 return "Needs a CPU with AVX2";
             if (! stemsModelLooksComplete())
-                return "First run downloads the model once (85 MB)";
-            return "Vocals, drums, bass and the rest";
+                return "Downloads 84 MB on first use";
+            return {};
     }
 }
 
 void StemsCard::paint (juce::Graphics& g)
 {
-    g.setColour (theme::panel);
-    g.fillRoundedRectangle (getLocalBounds().toFloat(), 8.0f);
     drawCaption (g, captionArea, "Stems");
 
     juce::Colour colour;
     const auto text = statusText (colour);
-    setTooltip (text); // the status line is short; errors can be long
+    setTooltip (proc.getStemsStatus().phase == Status::failed ? text : juce::String()); // errors can be longer than the line
     const auto s = proc.getStemsStatus();
     if (isRunning (s.phase))
     {

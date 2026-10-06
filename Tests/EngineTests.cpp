@@ -202,6 +202,29 @@ int main (int argc, char** argv)
     out = render (*proc, 0.3);
     check (out.getRMSLevel (0, (int) (0.05 * kRate), (int) (0.2 * kRate)) < 1.0e-4, "stopping the pattern silences it");
 
+    std::cout << "A note can start partway into its chop\n";
+    {
+        Pattern late;
+        late.lengthBeats = 4.0;
+        late.notes = { { 0, 0.0, 1.0, 1.0f, 0.1 } }; // chop 1, starting 0.1 s in
+        proc->setPattern (late);
+        proc->playPattern (true);
+        const auto played = render (*proc, 0.3);
+        proc->playPattern (false);
+        render (*proc, 0.1);
+        const auto& src = proc->doc().sample->audio;
+        const int from = (int) proc->doc().slices[0].start + (int) (0.1 * kRate);
+        const int chopEnd = (int) proc->doc().slices[0].end;
+        float worst = 0.0f, loudest = 0.0f;
+        for (int i = (int) (0.003 * kRate); i < juce::jmin ((int) (0.25 * kRate), chopEnd - from - (int) (0.004 * kRate)); ++i)
+        {
+            worst = juce::jmax (worst, std::abs (played.getSample (0, i) - src.getSample (0, from + i)));
+            loudest = juce::jmax (loudest, std::abs (src.getSample (0, from + i)));
+        }
+        check (loudest > 0.01f && worst < 1.0e-4f, "plays the chop from 0.1 s in (largest difference " + juce::String (worst, 6) + ")");
+    }
+    proc->setPattern (p);
+
     std::cout << "Undo and chop edits keep the pattern pointing at the same audio\n";
     auto p2 = p;
     p2.notes.push_back ({ 8, 3.0, 0.5, 0.5f });
@@ -250,6 +273,11 @@ int main (int argc, char** argv)
     std::cout << "Lyrics edits and state round-trip\n";
     proc->setSliceLyrics (3, "oh yeah");
     check (proc->doc().lyricsFor (3) == "oh yeah", "edited lyrics show on the chop");
+    {
+        auto withOffset = proc->doc().pattern;
+        withOffset.notes[0].offset = 0.05;
+        proc->setPattern (withOffset);
+    }
     proc->setLyricsOptions (1, "es");
     juce::MemoryBlock state;
     proc->getStateInformation (state);
@@ -260,6 +288,7 @@ int main (int argc, char** argv)
     check (waitFor ([&] { return ! reopened->isAnalysing() && reopened->doc().slices.size() == 32; }), "project reopens");
     check (reopened->doc().pattern.notes.size() == 32 && std::abs (reopened->doc().pattern.lengthBeats - 16.0) < 1.0e-6, "pattern restored");
     check (reopened->doc().lyricsFor (3) == "oh yeah", "lyrics edit restored");
+    check (std::abs (reopened->doc().pattern.notes[0].offset - 0.05) < 1.0e-9, "note start offset restored");
     check (reopened->doc().lyrics.model == 1 && reopened->doc().lyrics.requestedLanguage == "es", "lyrics settings restored");
     reopened = nullptr;
 
@@ -300,6 +329,20 @@ int main (int argc, char** argv)
         const float chopPeak = proc->doc().sample->audio.getMagnitude (0, (int) proc->doc().slices[0].end);
         check (std::abs (preview.getMagnitude (0, preview.getNumSamples()) - chopPeak) < 0.02f, "and what plays is the stem");
 
+        // One chop can play a different stem from the rest
+        auto bassChop = proc->doc().slices[3].settings;
+        bassChop.stem = stemBass;
+        proc->setSliceSettings (3, bassChop);
+        pump (300);
+        proc->previewSlice (3);
+        const auto chop4 = render (*proc, 0.25);
+        const auto& s3 = proc->doc().slices[3];
+        const auto& mixAudio = proc->doc().mix()->audio;
+        const int span = juce::jmin ((int) (s3.end - s3.start), (int) (0.25 * kRate));
+        const float mixPeak3 = mixAudio.getMagnitude (0, (int) s3.start, span);
+        check (std::abs (chop4.getMagnitude (0, chop4.getNumSamples()) - 0.3f * mixPeak3) < 0.02f,
+               "chop 4 plays the bass stem while the others play the drums");
+
         juce::MemoryBlock stemState;
         proc->getStateInformation (stemState);
         auto reopened = std::make_unique<ChopLabProcessor>();
@@ -311,6 +354,7 @@ int main (int argc, char** argv)
                "still playing the drum stem, read back from its file");
         check (std::abs (reopened->doc().mix()->audio.getMagnitude (0, reopened->doc().mix()->audio.getNumSamples()) - mixPeak) < 1.0e-3f,
                "the project itself holds the full mix");
+        check (reopened->doc().slices[3].settings.stem == stemBass, "chop 4 still plays the bass stem");
         reopened = nullptr;
 
         const auto lastDrum = proc->doc().sample->audio.getSample (0, proc->doc().sample->audio.getNumSamples() - 1);

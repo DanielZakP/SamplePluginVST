@@ -33,20 +33,15 @@ public:
     void paint (juce::Graphics& g) override
     {
         g.fillAll (theme::background.withAlpha (0.75f));
-        g.setColour (theme::panelRaised);
-        g.fillRoundedRectangle (panel.toFloat(), 10.0f);
-        g.setColour (theme::outline);
-        g.drawRoundedRectangle (panel.toFloat(), 10.0f, 1.0f);
+        theme::drawPanel (g, panel.toFloat(), theme::panelRaised);
 
         auto r = panel.reduced (24, 20);
-        g.setFont (theme::font (22.0f, true));
-        g.setColour (theme::accent);
-        g.drawText ("CHOP", r.getX(), r.getY(), 64, 30, juce::Justification::centredLeft);
+        g.setFont (theme::font (20.0f, true));
         g.setColour (theme::text);
-        g.drawText ("LAB", r.getX() + 62, r.getY(), 60, 30, juce::Justification::centredLeft);
+        g.drawText ("ChopLab", r.getX(), r.getY(), 100, 30, juce::Justification::centredLeft);
         g.setColour (theme::textDim);
         g.setFont (theme::font (13.0f));
-        g.drawText ("version " + juce::String (JucePlugin_VersionString), r.getX() + 124, r.getY(), 200, 30, juce::Justification::centredLeft);
+        g.drawText ("version " + juce::String (JucePlugin_VersionString), r.getX() + 96, r.getY(), 200, 30, juce::Justification::centredLeft);
 
         g.setColour (theme::text);
         g.setFont (theme::font (14.0f));
@@ -64,9 +59,9 @@ public:
         g.drawFittedText (body, bodyArea, juce::Justification::topLeft, 20, 1.0f);
 
         g.setColour (theme::textDim);
-        g.setFont (theme::font (12.0f, true));
-        g.drawText ("SOURCE CODE", sourceCaption, juce::Justification::centredLeft);
-        g.drawText ("LICENSE", licenceCaption, juce::Justification::centredLeft);
+        g.setFont (theme::font (12.5f));
+        g.drawText ("Source code", sourceCaption, juce::Justification::centredLeft);
+        g.drawText ("License", licenceCaption, juce::Justification::centredLeft);
     }
 
     void resized() override

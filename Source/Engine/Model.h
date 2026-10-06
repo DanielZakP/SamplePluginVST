@@ -31,6 +31,7 @@ struct SliceSettings
     float releaseMs = 15.0f;
     juce::String lyrics;       // only used when lyricsEdited; otherwise the detected words are shown
     bool lyricsEdited = false;
+    int stem = -1;             // play this stem of the chop (a StemKind), or -1 for whatever the sample plays
 };
 
 struct Slice
@@ -78,6 +79,7 @@ struct PatternNote
     double start = 0.0;
     double length = 1.0;
     float velocity = 0.8f;
+    double offset = 0.0; // seconds of the chop skipped when this note plays (it starts that far in)
 
     double end() const { return start + length; }
 };
@@ -137,6 +139,13 @@ struct Document
     bool hasSample() const { return sample != nullptr && sample->audio.getNumSamples() > 0; }
     // The full mix, whichever source is playing. Chops, lyrics and tempo belong to its timeline.
     std::shared_ptr<const SampleData> mix() const { return stems != nullptr ? stems->mix : sample; }
+    // The stem a chop has been set to play, if there are stems; otherwise what the sample plays.
+    int stemFor (const Slice& s) const { return stems != nullptr && s.settings.stem >= 0 && s.settings.stem < kNumStems ? s.settings.stem : -1; }
+    std::shared_ptr<const SampleData> audioFor (const Slice& s) const
+    {
+        const int stem = stemFor (s);
+        return stem >= 0 ? stems->stems[(size_t) stem] : sample;
+    }
     juce::int64 length() const { return sample != nullptr ? sample->audio.getNumSamples() : 0; }
     double sampleRate() const { return sample != nullptr ? sample->sampleRate : 44100.0; }
     double secondsAt (juce::int64 pos) const { return (double) pos / sampleRate(); }

@@ -47,7 +47,7 @@ ChopLabEditor::ChopLabEditor (ChopLabProcessor& p)
     addAndMakeVisible (loadButton);
 
     bpmValue.setEditable (false, true, false);
-    bpmValue.setFont (theme::font (26.0f, true));
+    bpmValue.setFont (theme::font (21.0f));
     bpmValue.setJustificationType (juce::Justification::centredLeft);
     bpmValue.setTooltip ("Double-click to type the tempo");
     bpmValue.onTextChange = [this]
@@ -448,72 +448,68 @@ void ChopLabEditor::paintCards (juce::Graphics& g)
     const auto& d = proc.doc();
     const bool has = d.hasSample();
 
-    for (auto r : { tempoCard, keyCard, timeCard })
+    // One strip, split into sections, rather than separate boxes
+    theme::drawPanel (g, cards.toFloat());
+    for (auto r : { keyCard, timeCard, lyricsCard.getBounds(), stemsCard.getBounds() })
     {
-        g.setColour (theme::panel);
-        g.fillRoundedRectangle (r.toFloat(), 8.0f);
+        g.setColour (theme::edge);
+        g.drawVerticalLine (r.getX() - 6, (float) cards.getY() + 8.0f, (float) cards.getBottom() - 8.0f);
+        g.setColour (juce::Colours::white.withAlpha (0.04f));
+        g.drawVerticalLine (r.getX() - 5, (float) cards.getY() + 8.0f, (float) cards.getBottom() - 8.0f);
     }
 
     auto sub = [&] (juce::Rectangle<int> card, const juce::String& s, juce::Colour c = theme::textDim)
     {
         g.setColour (c);
-        g.setFont (theme::font (12.5f));
-        g.drawText (s, card.reduced (12, 0).removeFromBottom (24).withTrimmedBottom (6), juce::Justification::centredLeft, true);
+        g.setFont (theme::font (12.0f));
+        g.drawText (s, card.reduced (12, 0).removeFromBottom (22).withTrimmedBottom (6), juce::Justification::centredLeft, true);
     };
-    auto big = [&] (juce::Rectangle<int> area, const juce::String& s, juce::Colour c = theme::text)
+    auto readout = [&] (juce::Rectangle<int> area, const juce::String& s, juce::Colour c = theme::text)
     {
+        theme::drawInset (g, area.toFloat());
         g.setColour (c);
-        g.setFont (theme::font (24.0f, true));
-        g.drawText (s, area, juce::Justification::centredLeft, true);
+        g.setFont (theme::font (18.0f));
+        g.drawText (s, area.reduced (8, 0), juce::Justification::centredLeft, true);
     };
 
     // Tempo
     drawCaption (g, tempoCard.reduced (12, 8), "Tempo");
+    theme::drawInset (g, bpmValue.getBounds().toFloat().withWidth ((float) (halfButton.getX() - bpmValue.getX() - 6)));
     g.setColour (theme::textDim);
-    g.setFont (theme::font (13.0f));
-    g.drawText ("BPM", bpmValue.getBounds().translated (juce::GlyphArrangement::getStringWidthInt (bpmValue.getFont(), bpmValue.getText()) + 12, 2),
+    g.setFont (theme::font (12.0f));
+    g.drawText ("BPM", bpmValue.getBounds().translated (juce::GlyphArrangement::getStringWidthInt (bpmValue.getFont(), bpmValue.getText()) + 12, 1),
                 juce::Justification::centredLeft);
     if (has)
     {
         const auto& t = d.detectedTempo;
-        juce::String s = std::abs (d.bpm - t.bpm) < 0.001 ? "Detected" : "Detected " + formatBpm (t.bpm) + ", set by you";
-        if (t.loopDetected && std::abs (d.bpm - t.bpm) < 0.001)
-            s << ", sample is a " << juce::String ((int) std::lround (d.sample->lengthSeconds() * d.bpm / 60.0 / d.timeSig.quarterBeatsPerBar()))
-              << "-bar loop";
+        juce::String s;
+        if (std::abs (d.bpm - t.bpm) >= 0.001)
+            s = "detected " + formatBpm (t.bpm);
+        else if (t.loopDetected)
+            s = juce::String ((int) std::lround (d.sample->lengthSeconds() * d.bpm / 60.0 / d.timeSig.quarterBeatsPerBar())) + "-bar loop";
         sub (tempoCard, s);
     }
 
     // Key
     drawCaption (g, keyCard.reduced (12, 8), "Key");
-    auto keyBig = keyCard.reduced (12, 0).withTrimmedTop (22).withHeight (30);
+    const auto keyBox = keyCard.reduced (12, 0).withTrimmedTop (24).withHeight (28);
     if (! has)
-        big (keyBig, "--", theme::textFaint);
+        readout (keyBox, "-", theme::textFaint);
     else if (d.key.hasKey)
     {
-        big (keyBig, keyName (d.key.best));
-        sub (keyCard, "or " + keyName (d.key.alt) + "  |  " + juce::String (juce::roundToInt (d.key.confidence * 100.0f)) + "% sure");
+        readout (keyBox, keyName (d.key.best));
+        sub (keyCard, "alt " + keyName (d.key.alt) + "    " + juce::String (juce::roundToInt (d.key.confidence * 100.0f)) + "%");
     }
     else
     {
-        big (keyBig, "No clear key", theme::textDim);
-        sub (keyCard, "Mostly drums or noise");
+        readout (keyBox, "-", theme::textDim);
+        sub (keyCard, "no clear key");
     }
 
     // Time signature
-    drawCaption (g, timeCard.reduced (12, 8), "Time signature");
-    if (has)
-    {
-        juce::String s;
-        if (! d.meterIsAuto)
-            s = "Set by you";
-        else
-            s = d.detectedGrid.meterConfidence > 0.6f ? "Detected, fairly sure" : "Detected, best guess";
-        const auto first = d.gridPosition (0);
-        if (d.downbeatSeconds > 0.01)
-            s << "  |  bar 1 at " << juce::String (d.downbeatSeconds, 2) << " s";
-        juce::ignoreUnused (first);
-        sub (timeCard, s);
-    }
+    drawCaption (g, timeCard.reduced (12, 8), "Time");
+    if (has && d.downbeatSeconds > 0.01)
+        sub (timeCard, "bar 1 at " + juce::String (d.downbeatSeconds, 2) + " s");
 }
 
 void ChopLabEditor::paint (juce::Graphics& g)
@@ -521,17 +517,16 @@ void ChopLabEditor::paint (juce::Graphics& g)
     g.fillAll (theme::background);
 
     // Header
-    g.setColour (theme::panelRaised);
+    g.setGradientFill (juce::ColourGradient::vertical (theme::panel.brighter (0.04f), (float) header.getY(), theme::panel.darker (0.08f),
+                                                       (float) header.getBottom()));
     g.fillRect (header);
-    g.setColour (theme::outline);
+    g.setColour (theme::edge);
     g.drawHorizontalLine (header.getBottom() - 1, 0.0f, (float) getWidth());
 
     auto h = header.reduced (14, 0);
-    g.setColour (theme::accent);
-    g.setFont (theme::font (19.0f, true));
-    g.drawText ("CHOP", h.removeFromLeft (52), juce::Justification::centredLeft);
     g.setColour (theme::text);
-    g.drawText ("LAB", h.removeFromLeft (44), juce::Justification::centredLeft);
+    g.setFont (theme::font (17.0f, true));
+    g.drawText ("ChopLab", h.removeFromLeft (96), juce::Justification::centredLeft);
 
     const auto& d = proc.doc();
     auto info = h.withTrimmedLeft (loadButton.getRight() - h.getX() + 14);
@@ -540,21 +535,21 @@ void ChopLabEditor::paint (juce::Graphics& g)
         const double secs = d.sample->lengthSeconds();
         const juce::String length = juce::String ((int) secs / 60) + ":" + juce::String (std::fmod (secs, 60.0), 1).paddedLeft ('0', 4);
         g.setColour (theme::text);
-        g.setFont (theme::font (14.5f, true));
+        g.setFont (theme::font (13.5f));
         const auto name = d.sample->name + (d.reversed ? " (reversed)" : "");
         g.drawText (name, info, juce::Justification::centredLeft, true);
-        const int nameW = juce::jmin (info.getWidth() / 2, juce::GlyphArrangement::getStringWidthInt (theme::font (14.5f, true), name) + 12);
+        const int nameW = juce::jmin (info.getWidth() / 2, juce::GlyphArrangement::getStringWidthInt (theme::font (13.5f), name) + 14);
         g.setColour (theme::textDim);
-        g.setFont (theme::font (13.0f));
-        g.drawText (length + "  |  " + juce::String (d.sample->sampleRate / 1000.0, 1) + " kHz  |  "
-                        + (d.sample->audio.getNumChannels() > 1 ? "stereo" : "mono") + "  |  " + juce::String (d.slices.size()) + " chops",
+        g.setFont (theme::font (12.5f));
+        g.drawText (length + "   " + juce::String (d.sample->sampleRate / 1000.0, 1) + " kHz   "
+                        + (d.sample->audio.getNumChannels() > 1 ? "stereo" : "mono") + "   " + juce::String (d.slices.size()) + " chops",
                     info.withTrimmedLeft (nameW), juce::Justification::centredLeft, true);
     }
 
     if (status.isNotEmpty())
     {
-        g.setColour (statusIsError ? juce::Colour (0xffff6b6b) : theme::textDim);
-        g.setFont (theme::font (13.0f));
+        g.setColour (statusIsError ? theme::error : theme::textDim);
+        g.setFont (theme::font (12.5f));
         g.drawText (status, statusArea, juce::Justification::centredRight, true);
     }
 
@@ -563,25 +558,22 @@ void ChopLabEditor::paint (juce::Graphics& g)
         return;
 
     // Chop bar
-    g.setColour (theme::panel);
-    g.fillRoundedRectangle (chopBar.toFloat(), 8.0f);
+    theme::drawPanel (g, chopBar.toFloat());
     g.setColour (theme::textDim);
-    g.setFont (theme::font (11.0f, true));
-    g.drawText ("CHOP BY", chopCaption, juce::Justification::centredLeft);
+    g.setFont (theme::font (12.0f));
+    g.drawText ("Chop by", chopCaption, juce::Justification::centredLeft);
     if (d.chop.mode == ChopMode::transients)
     {
-        g.drawText ("SENSITIVITY", sensCaption, juce::Justification::centredRight);
-        g.drawText ("MIN LENGTH", gapCaption, juce::Justification::centredRight);
+        g.drawText ("Sensitivity", sensCaption, juce::Justification::centredRight);
+        g.drawText ("Min length", gapCaption, juce::Justification::centredRight);
     }
     else if (d.chop.mode == ChopMode::grid)
     {
-        g.drawText ("EVERY", gridCaption, juce::Justification::centredRight);
+        g.drawText ("Every", gridCaption, juce::Justification::centredRight);
     }
     else
     {
-        g.setFont (theme::font (12.5f));
-        g.drawText ("Double-click the waveform to add a chop, drag markers to move, right-click to remove", manualHint,
-                    juce::Justification::centredLeft, true);
+        g.drawText ("Double-click to add, drag to move, right-click to remove", manualHint, juce::Justification::centredLeft, true);
     }
 }
 
@@ -592,9 +584,9 @@ void ChopLabEditor::paintOverChildren (juce::Graphics& g)
     g.setColour (theme::background.withAlpha (0.7f));
     g.fillAll();
     g.setColour (theme::accent);
-    g.drawRoundedRectangle (getLocalBounds().toFloat().reduced (6.0f), 10.0f, 3.0f);
-    g.setFont (theme::font (24.0f, true));
-    g.drawText ("Drop to load and analyze", getLocalBounds(), juce::Justification::centred);
+    g.drawRect (getLocalBounds().reduced (6), 2);
+    g.setFont (theme::font (20.0f));
+    g.drawText ("Drop to load", getLocalBounds(), juce::Justification::centred);
 }
 
 void ChopLabEditor::resized()
@@ -619,28 +611,29 @@ void ChopLabEditor::resized()
     }
 
     r.reduce (10, 10);
-    cards = r.removeFromTop (78);
+    cards = r.removeFromTop (76);
     {
-        auto c = cards;
-        const int gap = 10;
+        auto c = cards.reduced (6, 0);
+        const int gap = 12;
         const int available = c.getWidth() - 4 * gap;
         tempoCard = c.removeFromLeft (available * 19 / 100);
         c.removeFromLeft (gap);
-        keyCard = c.removeFromLeft (available * 17 / 100);
+        keyCard = c.removeFromLeft (available * 16 / 100);
         c.removeFromLeft (gap);
-        timeCard = c.removeFromLeft (available * 17 / 100);
+        timeCard = c.removeFromLeft (available * 14 / 100);
         c.removeFromLeft (gap);
         lyricsCard.setBounds (c.removeFromLeft ((c.getWidth() - gap) / 2));
         c.removeFromLeft (gap);
         stemsCard.setBounds (c);
 
-        auto t = tempoCard.reduced (12, 0).withTrimmedTop (22).withHeight (32);
-        doubleButton.setBounds (t.removeFromRight (36).reduced (0, 3));
+        auto t = tempoCard.reduced (12, 0).withTrimmedTop (24).withHeight (28);
+        doubleButton.setBounds (t.removeFromRight (32));
         t.removeFromRight (4);
-        halfButton.setBounds (t.removeFromRight (36).reduced (0, 3));
-        bpmValue.setBounds (t.withWidth (juce::jmin (t.getWidth() - 40, 120)));
+        halfButton.setBounds (t.removeFromRight (32));
+        t.removeFromRight (6);
+        bpmValue.setBounds (t.withWidth (juce::jmin (t.getWidth(), 130)));
 
-        timeSigBox.setBounds (timeCard.reduced (12, 0).withTrimmedTop (24).withHeight (28).withWidth (140));
+        timeSigBox.setBounds (timeCard.reduced (12, 0).withTrimmedTop (24).withHeight (28).withWidth (juce::jmin (140, timeCard.getWidth() - 24)));
     }
     r.removeFromTop (10);
     pageArea = r;

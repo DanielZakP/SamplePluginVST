@@ -76,7 +76,7 @@ public:
     bool canUndo() const { return ! undoStack.empty(); }
     bool canRedo() const { return ! redoStack.empty(); }
 
-    void previewSlice (int index);
+    void previewSlice (int index, double startSeconds = 0.0); // startSeconds: how far into the chop to start
     void previewFull();
     void stopPreview();
 
@@ -136,6 +136,9 @@ public:
     int currentPage = 0; // editor page: 0 = chops, 1 = pattern
 
     double getHostBpm() const { return hostBpm.load(); }
+    // How a chop is played right now (speed, pitch, reverse), and for how long in seconds.
+    choplab::Processing chopProcessing (int index) const;
+    double chopPlaySeconds (int index) const;
     void getPlayingPositions (std::vector<juce::int64>&) const;
 
     juce::File getDragFolder() const;
@@ -256,12 +259,24 @@ private:
         bool releasing = false;
         bool active = false;
         bool fromPattern = false;
+        double startPos = 0.0; // where it started in the chop (later than 0 for notes with an offset)
         juce::uint32 age = 0;
     };
 
+    // What the built-in pattern plays in one block, in time order.
+    struct PatternEvent
+    {
+        int at = 0; // sample within the block
+        int chop = 0;
+        float velocity = 0.8f;
+        double offset = 0.0; // seconds into the chop
+        bool on = false;
+    };
+
     void handleMidi (const juce::MidiMessage&);
-    void startVoice (int sliceIndex, int note, float velocity, bool preview, bool fromPattern = false);
+    void startVoice (int sliceIndex, int note, float velocity, bool preview, bool fromPattern = false, double startSeconds = 0.0);
     void addPatternEvents (int numSamples);
+    void handlePatternEvent (const PatternEvent&);
     void publishPattern();
     void releaseVoice (Voice&, bool fast);
     void renderVoices (juce::AudioBuffer<float>&, int start, int num);
@@ -277,7 +292,12 @@ private:
     juce::ReferenceCountedArray<choplab::PlaybackData> retired;
 
     juce::AbstractFifo previewFifo { 32 };
-    std::array<int, 32> previewQueue {};
+    struct PreviewRequest
+    {
+        int index = 0;
+        double startSeconds = 0.0;
+    };
+    std::array<PreviewRequest, 32> previewQueue {};
     static constexpr int kPreviewFull = -1, kPreviewStop = -2;
 
     std::atomic<double> hostBpm { 120.0 };
@@ -300,8 +320,8 @@ private:
     bool patternWasPlaying = false;
     double patternBeat = 0.0;
     std::atomic<double> patternPosition { 0.0 };
-    juce::MidiBuffer combinedMidi;
-    static constexpr int kPatternChannel = 16;
+    std::array<PatternEvent, 512> patternEvents;
+    size_t numPatternEvents = 0;
 
     choplab::RenderThread renderThread { [this] (choplab::PlaybackData::Ptr d) { publish (d); } };
 

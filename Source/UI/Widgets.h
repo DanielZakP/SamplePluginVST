@@ -14,7 +14,7 @@ public:
           std::function<juce::String (double)> format, double skewCentre = 0.0)
         : caption ({}, name)
     {
-        caption.setFont (theme::font (11.5f, true));
+        caption.setFont (theme::font (12.0f));
         caption.setColour (juce::Label::textColourId, theme::textDim);
         caption.setJustificationType (juce::Justification::centred);
         caption.setInterceptsMouseClicks (false, false);
@@ -79,26 +79,21 @@ public:
 
     void paint (juce::Graphics& g) override
     {
-        auto r = getLocalBounds().toFloat().reduced (0.5f);
-        const float alpha = isEnabled() ? 1.0f : 0.4f;
-        g.setColour (theme::panelRaised.brighter (hover ? 0.08f : 0.0f).withMultipliedAlpha (alpha));
-        g.fillRoundedRectangle (r, 5.0f);
-        g.setColour (theme::accent.withMultipliedAlpha (alpha));
-        const float dash[] { 3.0f, 3.0f };
-        juce::Path p;
-        p.addRoundedRectangle (r, 5.0f);
-        juce::Path dashed;
-        juce::PathStrokeType (1.0f).createDashedStroke (dashed, p, dash, 2);
-        g.fillPath (dashed);
+        auto r = getLocalBounds().toFloat();
+        const float alpha = isEnabled() ? 1.0f : 0.45f;
+        const auto c = theme::panelRaised.brighter (hover ? 0.06f : 0.0f).withMultipliedAlpha (alpha);
+        g.setGradientFill (juce::ColourGradient::vertical (c.brighter (0.05f), r.getY(), c.darker (0.1f), r.getBottom()));
+        g.fillRoundedRectangle (r, theme::radius);
+        g.setColour (theme::edge.withMultipliedAlpha (alpha));
+        g.drawRoundedRectangle (r.reduced (0.5f), theme::radius, 1.0f);
 
-        // grip dots
-        g.setColour (theme::accent.withMultipliedAlpha (alpha));
+        // Grip: you pick this up and drop it somewhere
+        g.setColour (theme::textDim.withMultipliedAlpha (alpha));
         for (int i = 0; i < 3; ++i)
-            for (int j = 0; j < 2; ++j)
-                g.fillEllipse (9.0f + (float) j * 4.0f, r.getCentreY() - 5.0f + (float) i * 4.0f, 2.0f, 2.0f);
+            g.fillRect (8.0f, r.getCentreY() - 4.0f + (float) i * 3.0f, 8.0f, 1.0f);
 
         g.setColour (theme::text.withMultipliedAlpha (alpha));
-        g.setFont (theme::font (13.0f));
+        g.setFont (theme::font (12.5f));
         g.drawText (text, r.withTrimmedLeft (22.0f).toNearestInt(), juce::Justification::centredLeft, true);
     }
 
@@ -135,12 +130,12 @@ private:
     bool hover = false, started = false;
 };
 
-// Small caption + value block used in the header cards.
+// Small caption above a value or a group of controls.
 inline void drawCaption (juce::Graphics& g, juce::Rectangle<int> r, const juce::String& s)
 {
     g.setColour (theme::textDim);
-    g.setFont (theme::font (11.0f, true));
-    g.drawText (s.toUpperCase(), r, juce::Justification::topLeft, false);
+    g.setFont (theme::font (12.0f));
+    g.drawText (s, r, juce::Justification::topLeft, false);
 }
 
 } // namespace choplab

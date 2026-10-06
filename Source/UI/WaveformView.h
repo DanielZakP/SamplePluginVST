@@ -50,9 +50,17 @@ private:
     void showMenu (const juce::MouseEvent&);
     void drawGrid (juce::Graphics&, juce::Rectangle<int> wave, juce::Rectangle<int> ruler);
 
+    // Min/max per block of 64 samples, for the mix and any stems chops are set to play
+    struct Peaks
+    {
+        std::shared_ptr<const SampleData> source;
+        std::vector<float> lo, hi;
+    };
+    const Peaks& peaksOf (const std::shared_ptr<const SampleData>&);
+
     ChopLabProcessor& proc;
     static constexpr int kPeakBlock = 64;
-    std::vector<float> peakMin, peakMax;
+    std::vector<Peaks> peaks;
     const SampleData* peaksFor = nullptr;
 
     double viewStart = 0.0, viewLength = 1.0;

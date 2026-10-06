@@ -182,7 +182,6 @@ ChopLabProcessor::ChopLabProcessor()
 {
     for (auto& p : playPositions)
         p = -1;
-    combinedMidi.ensureSize (16384);
     startTimerHz (5);
 }
 
@@ -202,7 +201,6 @@ void ChopLabProcessor::prepareToPlay (double sampleRate, int)
 {
     currentRate = sampleRate;
     preparedRate = sampleRate;
-    combinedMidi.ensureSize (16384);
     for (auto& v : voices)
     {
         v.active = false;
@@ -237,8 +235,9 @@ void ChopLabProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     {
         int start1, size1, start2, size2;
         previewFifo.prepareToRead (previewFifo.getNumReady(), start1, size1, start2, size2);
-        auto handle = [this] (int request)
+        auto handle = [this] (const PreviewRequest& r)
         {
+            const int request = r.index;
             if (request == kPreviewStop)
             {
                 for (auto& v : voices)
@@ -247,7 +246,7 @@ void ChopLabProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
             }
             else
             {
-                startVoice (request == kPreviewFull ? -1 : request, -1, 1.0f, true);
+                startVoice (request == kPreviewFull ? -1 : request, -1, 1.0f, true, false, r.startSeconds);
             }
         };
         for (int i = 0; i < size1; ++i)
@@ -263,24 +262,35 @@ void ChopLabProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
             audioPattern = publishedPattern;
     }
 
-    // Host MIDI plus whatever the built-in pattern plays in this block, in time order.
-    combinedMidi.clear();
-    combinedMidi.addEvents (midi, 0, numSamples, 0);
+    // Host MIDI and whatever the built-in pattern plays in this block, in time order.
     addPatternEvents (numSamples);
-
     int pos = 0;
-    for (const auto meta : combinedMidi)
+    size_t next = 0;
+    auto renderUpTo = [&] (int t)
     {
-        const int t = juce::jlimit (0, numSamples, meta.samplePosition);
         if (t > pos)
         {
             renderVoices (buffer, pos, t - pos);
             pos = t;
         }
+    };
+    for (const auto meta : midi)
+    {
+        const int t = juce::jlimit (0, numSamples, meta.samplePosition);
+        for (; next < numPatternEvents && patternEvents[next].at <= t; ++next)
+        {
+            renderUpTo (patternEvents[next].at);
+            handlePatternEvent (patternEvents[next]);
+        }
+        renderUpTo (t);
         handleMidi (meta.getMessage());
     }
-    if (pos < numSamples)
-        renderVoices (buffer, pos, numSamples - pos);
+    for (; next < numPatternEvents; ++next)
+    {
+        renderUpTo (patternEvents[next].at);
+        handlePatternEvent (patternEvents[next]);
+    }
+    renderUpTo (numSamples);
 
     size_t reported = 0;
     for (const auto& v : voices)
@@ -299,6 +309,7 @@ void ChopLabProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
 
 void ChopLabProcessor::addPatternEvents (int numSamples)
 {
+    numPatternEvents = 0;
     const bool playing = patternPlaying.load();
     if (playing && ! patternWasPlaying)
         patternBeat = 0.0;
@@ -314,55 +325,48 @@ void ChopLabProcessor::addPatternEvents (int numSamples)
     const double beatsPerSample = hostBpm.load() / 60.0 / currentRate;
     const double span = numSamples * beatsPerSample;
 
-    struct Event
-    {
-        double offset;
-        int note;
-        float velocity;
-        bool on;
-    };
-    std::array<Event, 512> events;
-    size_t count = 0;
-    const int root = audioData->rootNote;
     const int numChops = (int) audioData->slices.size();
-    forEachPatternEvent (audioPattern->notes, audioPattern->lengthBeats, patternBeat, span, [&] (size_t index, double offset, bool on)
+    forEachPatternEvent (audioPattern->notes, audioPattern->lengthBeats, patternBeat, span, [&] (size_t index, double beats, bool on)
     {
         const auto& n = audioPattern->notes[index];
-        if (count < events.size() && n.chop >= 0 && n.chop < numChops && root + n.chop <= 127)
-            events[count++] = { offset, root + n.chop, n.velocity, on };
+        if (numPatternEvents < patternEvents.size() && n.chop >= 0 && n.chop < numChops)
+            patternEvents[numPatternEvents++] = { juce::jlimit (0, numSamples - 1, (int) (beats / beatsPerSample)), n.chop, n.velocity, n.offset, on };
     });
     // Note-offs before note-ons at the same moment, so a repeated chop isn't cut by its own previous note.
-    std::sort (events.begin(), events.begin() + (std::ptrdiff_t) count,
-               [] (const Event& a, const Event& b) { return a.offset < b.offset || (! (b.offset < a.offset) && ! a.on && b.on); });
-    for (size_t i = 0; i < count; ++i)
-    {
-        const auto& e = events[i];
-        const int at = juce::jlimit (0, numSamples - 1, (int) (e.offset / beatsPerSample));
-        combinedMidi.addEvent (e.on ? juce::MidiMessage::noteOn (kPatternChannel, e.note, e.velocity)
-                                    : juce::MidiMessage::noteOff (kPatternChannel, e.note),
-                               at);
-    }
+    std::sort (patternEvents.begin(), patternEvents.begin() + (std::ptrdiff_t) numPatternEvents,
+               [] (const PatternEvent& a, const PatternEvent& b) { return a.at < b.at || (a.at == b.at && ! a.on && b.on); });
 
     patternBeat = std::fmod (patternBeat + span, audioPattern->lengthBeats);
     patternPosition = patternBeat;
 }
 
+void ChopLabProcessor::handlePatternEvent (const PatternEvent& e)
+{
+    if (e.on)
+    {
+        startVoice (e.chop, -1, e.velocity, false, true, e.offset);
+        return;
+    }
+    for (auto& v : voices)
+        if (v.active && v.fromPattern && ! v.oneShot && ! v.releasing && v.sliceIndex == e.chop)
+            releaseVoice (v, false);
+}
+
 void ChopLabProcessor::handleMidi (const juce::MidiMessage& m)
 {
-    const bool fromPattern = m.getChannel() == kPatternChannel;
     if (m.isNoteOn())
     {
         if (audioData != nullptr)
         {
             const int index = m.getNoteNumber() - audioData->rootNote;
             if (index >= 0 && index < (int) audioData->slices.size())
-                startVoice (index, m.getNoteNumber(), m.getFloatVelocity(), false, fromPattern);
+                startVoice (index, m.getNoteNumber(), m.getFloatVelocity(), false);
         }
     }
     else if (m.isNoteOff())
     {
         for (auto& v : voices)
-            if (v.active && ! v.preview && ! v.oneShot && ! v.releasing && v.note == m.getNoteNumber() && v.fromPattern == fromPattern)
+            if (v.active && ! v.preview && ! v.oneShot && ! v.releasing && ! v.fromPattern && v.note == m.getNoteNumber())
                 releaseVoice (v, false);
     }
     else if (m.isAllNotesOff() || m.isAllSoundOff())
@@ -373,7 +377,7 @@ void ChopLabProcessor::handleMidi (const juce::MidiMessage& m)
     }
 }
 
-void ChopLabProcessor::startVoice (int sliceIndex, int note, float velocity, bool preview, bool fromPattern)
+void ChopLabProcessor::startVoice (int sliceIndex, int note, float velocity, bool preview, bool fromPattern, double startSeconds)
 {
     if (audioData == nullptr)
         return;
@@ -409,7 +413,8 @@ void ChopLabProcessor::startVoice (int sliceIndex, int note, float velocity, boo
     v.preview = preview;
     v.fromPattern = fromPattern;
     v.oneShot = preview || audioData->oneShot;
-    v.pos = 0.0;
+    v.pos = juce::jlimit (0.0, (double) juce::jmax (0, rs->length - 2), startSeconds * audioData->sampleRate);
+    v.startPos = v.pos;
     v.inc = audioData->sampleRate / currentRate;
     v.gain = rs->gain * audioData->masterGain * (preview ? 1.0f : velocity);
     const float attack = rs->attackMs * 0.001f * (float) currentRate;
@@ -442,8 +447,9 @@ void ChopLabProcessor::renderVoices (juce::AudioBuffer<float>& buffer, int start
         const int len = v.slice->length;
         const float* s0 = audio.getReadPointer (0) + v.slice->offset;
         const float* s1 = audio.getNumChannels() > 1 ? audio.getReadPointer (1) + v.slice->offset : s0;
-        // Short fades at the chop edges so cutting mid-waveform never clicks
-        const double fadeIn = 0.0003 * currentRate / v.inc, fadeOut = 0.003 * currentRate / v.inc;
+        // Short fades at the chop edges so cutting mid-waveform never clicks (a little longer when a
+        // note starts partway into the chop, which is usually mid-waveform)
+        const double fadeIn = (v.startPos > 0.0 ? 0.002 : 0.0003) * currentRate / v.inc, fadeOut = 0.003 * currentRate / v.inc;
         bool finished = false;
 
         for (int i = start; i < start + num; ++i)
@@ -473,7 +479,7 @@ void ChopLabProcessor::renderVoices (juce::AudioBuffer<float>& buffer, int start
             const float l = s0[idx] + frac * (s0[idx + 1] - s0[idx]);
             const float r = s1[idx] + frac * (s1[idx + 1] - s1[idx]);
             const double remaining = (double) (len - 1) - v.pos;
-            const float edge = (float) juce::jmin (1.0, v.pos / fadeIn, remaining / fadeOut);
+            const float edge = (float) juce::jmin (1.0, (v.pos - v.startPos) / fadeIn, remaining / fadeOut);
             const float g = v.gain * v.env * juce::jmax (0.0f, edge);
             if (right != nullptr)
             {
@@ -1453,13 +1459,27 @@ juce::File ChopLabProcessor::writePatternMidi (const juce::File& folder) const
 }
 
 //==============================================================================
-void ChopLabProcessor::previewSlice (int index)
+void ChopLabProcessor::previewSlice (int index, double startSeconds)
 {
     int start1, size1, start2, size2;
     previewFifo.prepareToWrite (1, start1, size1, start2, size2);
     if (size1 > 0)
-        previewQueue[(size_t) start1] = index;
+        previewQueue[(size_t) start1] = { index, startSeconds };
     previewFifo.finishedWrite (size1);
+}
+
+Processing ChopLabProcessor::chopProcessing (int index) const
+{
+    const auto* settings = index >= 0 && index < (int) document.slices.size() ? &document.slices[(size_t) index].settings : nullptr;
+    return combine (document.global, settings, hostTempoRatio());
+}
+
+double ChopLabProcessor::chopPlaySeconds (int index) const
+{
+    if (index < 0 || index >= (int) document.slices.size())
+        return 0.0;
+    const auto& s = document.slices[(size_t) index];
+    return document.secondsAt (s.end - s.start) / juce::jmax (0.01, chopProcessing (index).speed);
 }
 
 void ChopLabProcessor::previewFull()
@@ -1490,6 +1510,7 @@ void ChopLabProcessor::requestRender()
 {
     RenderRequest r;
     r.sample = document.sample;
+    r.stems = document.stems;
     r.slices = document.slices;
     r.global = document.global;
     r.hostTempoRatio = hostTempoRatio();
@@ -1554,7 +1575,8 @@ juce::AudioBuffer<float> ChopLabProcessor::renderForExport (int index) const
         return {};
     const Slice* slice = index >= 0 ? &document.slices[(size_t) index] : nullptr;
     const auto p = combine (document.global, slice != nullptr ? &slice->settings : nullptr, hostTempoRatio());
-    auto buffer = renderSegment (*document.sample, slice != nullptr ? slice->start : 0, slice != nullptr ? slice->end : document.length(), p,
+    const auto source = slice != nullptr ? document.audioFor (*slice) : document.sample;
+    auto buffer = renderSegment (*source, slice != nullptr ? slice->start : 0, slice != nullptr ? slice->end : document.length(), p,
                                  document.sampleRate());
     float gain = juce::Decibels::decibelsToGain (document.global.gainDb);
     if (slice != nullptr)
@@ -1705,6 +1727,8 @@ juce::ValueTree ChopLabProcessor::toValueTree() const
         st.setProperty ("release", s.settings.releaseMs, nullptr);
         if (s.settings.lyricsEdited)
             st.setProperty ("lyrics", s.settings.lyrics, nullptr);
+        if (s.settings.stem >= 0)
+            st.setProperty ("stem", s.settings.stem, nullptr);
         slices.appendChild (st, nullptr);
     }
     t.appendChild (slices, nullptr);
@@ -1734,6 +1758,8 @@ juce::ValueTree ChopLabProcessor::toValueTree() const
         nt.setProperty ("s", n.start, nullptr);
         nt.setProperty ("l", n.length, nullptr);
         nt.setProperty ("v", n.velocity, nullptr);
+        if (n.offset > 0.0)
+            nt.setProperty ("o", n.offset, nullptr);
         pattern.appendChild (nt, nullptr);
     }
     t.appendChild (pattern, nullptr);
@@ -1800,6 +1826,7 @@ void ChopLabProcessor::readSettings (const juce::ValueTree& t, Document& d)
         s.settings.releaseMs = st.getProperty ("release", 15.0f);
         s.settings.lyricsEdited = st.hasProperty ("lyrics");
         s.settings.lyrics = st.getProperty ("lyrics", "").toString();
+        s.settings.stem = juce::jlimit (-1, kNumStems - 1, (int) st.getProperty ("stem", -1));
         d.slices.push_back (s);
     }
 
@@ -1821,7 +1848,8 @@ void ChopLabProcessor::readSettings (const juce::ValueTree& t, Document& d)
         d.pattern.snapBeats = p.getProperty ("snap", 0.25);
         for (const auto& nt : p)
             d.pattern.notes.push_back ({ nt.getProperty ("c", 0), nt.getProperty ("s", 0.0), juce::jmax (1.0 / 64.0, (double) nt.getProperty ("l", 1.0)),
-                                         juce::jlimit (0.0f, 1.0f, (float) nt.getProperty ("v", 0.8f)) });
+                                         juce::jlimit (0.0f, 1.0f, (float) nt.getProperty ("v", 0.8f)),
+                                         juce::jlimit (0.0, 60.0, (double) nt.getProperty ("o", 0.0)) });
     }
 }
 

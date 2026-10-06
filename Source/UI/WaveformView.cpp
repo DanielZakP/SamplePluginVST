@@ -28,7 +28,7 @@ WaveformView::~WaveformView()
 void WaveformView::documentChanged()
 {
     const auto& d = proc.doc();
-    if (d.sample.get() != peaksFor)
+    if (d.mix().get() != peaksFor)
     {
         rebuildPeaks();
         zoomToFit();
@@ -38,34 +38,41 @@ void WaveformView::documentChanged()
 
 void WaveformView::rebuildPeaks()
 {
-    const auto& d = proc.doc();
-    peaksFor = d.sample.get();
-    peakMin.clear();
-    peakMax.clear();
-    if (! d.hasSample())
-        return;
+    peaksFor = proc.doc().mix().get();
+    peaks.clear();
+}
 
-    const auto& a = d.sample->audio;
+const WaveformView::Peaks& WaveformView::peaksOf (const std::shared_ptr<const SampleData>& source)
+{
+    for (const auto& p : peaks)
+        if (p.source == source)
+            return p;
+
+    Peaks p;
+    p.source = source;
+    const auto& a = source->audio;
     const int n = a.getNumSamples();
     const int blocks = (n + kPeakBlock - 1) / kPeakBlock;
-    peakMin.assign ((size_t) blocks, 0.0f);
-    peakMax.assign ((size_t) blocks, 0.0f);
+    p.lo.assign ((size_t) blocks, 0.0f);
+    p.hi.assign ((size_t) blocks, 0.0f);
     for (int c = 0; c < a.getNumChannels(); ++c)
     {
         const float* data = a.getReadPointer (c);
         for (int b = 0; b < blocks; ++b)
         {
             const int s0 = b * kPeakBlock, s1 = juce::jmin (n, s0 + kPeakBlock);
-            float lo = peakMin[(size_t) b], hi = peakMax[(size_t) b];
+            float lo = p.lo[(size_t) b], hi = p.hi[(size_t) b];
             for (int i = s0; i < s1; ++i)
             {
                 lo = juce::jmin (lo, data[i]);
                 hi = juce::jmax (hi, data[i]);
             }
-            peakMin[(size_t) b] = lo;
-            peakMax[(size_t) b] = hi;
+            p.lo[(size_t) b] = lo;
+            p.hi[(size_t) b] = hi;
         }
     }
+    peaks.push_back (std::move (p));
+    return peaks.back();
 }
 
 void WaveformView::zoomToFit()
@@ -187,7 +194,7 @@ void WaveformView::drawGrid (juce::Graphics& g, juce::Rectangle<int> wave, juce:
     // 16th lines when zoomed in far enough
     if (pxPer16th > 14.0)
     {
-        g.setColour (theme::outline.withAlpha (0.35f));
+        g.setColour (juce::Colour (0xff1e2125));
         const double step = 60.0 / d.bpm / 4.0;
         for (auto k = (juce::int64) std::floor ((viewStartSec - d.downbeatSeconds) / step);; ++k)
         {
@@ -203,7 +210,7 @@ void WaveformView::drawGrid (juce::Graphics& g, juce::Rectangle<int> wave, juce:
     const double pxPerBar = pxPerUnit * unitsPerBar;
     const int barLabelEvery = pxPerBar > 36.0 ? 1 : pxPerBar > 18.0 ? 2 : pxPerBar > 9.0 ? 4 : 8;
 
-    g.setFont (theme::font (11.0f));
+    g.setFont (theme::mono (11.0f));
     for (auto k = (juce::int64) std::floor ((viewStartSec - d.downbeatSeconds) / unitSeconds);; ++k)
     {
         const double t = d.downbeatSeconds + (double) k * unitSeconds;
@@ -215,10 +222,10 @@ void WaveformView::drawGrid (juce::Graphics& g, juce::Rectangle<int> wave, juce:
         const int x = (int) sampleToX (t * sr);
         const auto bar = (int) (k >= 0 ? k / unitsPerBar : -((-k + unitsPerBar - 1) / unitsPerBar)) + 1;
 
-        g.setColour (isBar ? theme::outline.brighter (0.35f) : theme::outline);
+        g.setColour (isBar ? juce::Colour (0xff3a3f46) : juce::Colour (0xff262a2f));
         g.drawVerticalLine (x, (float) wave.getY(), (float) wave.getBottom());
 
-        g.setColour (isBar ? theme::textDim : theme::outline.brighter (0.2f));
+        g.setColour (isBar ? theme::textDim : theme::textFaint);
         g.drawVerticalLine (x, (float) ruler.getBottom() - (isBar ? 8.0f : 4.0f), (float) ruler.getBottom());
         if (isBar && (bar - 1) % barLabelEvery == 0)
         {
@@ -235,23 +242,23 @@ void WaveformView::paint (juce::Graphics& g)
     const auto wave = waveArea();
     const auto ruler = rulerArea();
 
-    g.setColour (theme::panel);
+    g.setColour (theme::inset);
     g.fillRect (getLocalBounds());
-    g.setColour (theme::panelRaised);
+    g.setColour (theme::panel);
     g.fillRect (ruler);
 
     if (! d.hasSample())
     {
         g.setColour (theme::textDim);
-        g.setFont (theme::font (17.0f));
-        g.drawText (proc.isAnalysing() ? "Analyzing..." : "Drop a sample here (WAV, AIFF, FLAC, MP3, OGG)", wave, juce::Justification::centred);
+        g.setFont (theme::font (14.0f));
+        g.drawText (proc.isAnalysing() ? "Analyzing..." : "Drop a WAV, AIFF, FLAC, MP3 or OGG file here", wave, juce::Justification::centred);
         return;
     }
 
     const auto& slices = d.slices;
     const int selected = proc.selectedSlice;
 
-    // Chop backgrounds
+    // Chop backgrounds: every other chop a shade lighter, the selected one tinted
     for (int i = 0; i < (int) slices.size(); ++i)
     {
         const auto& s = slices[(size_t) i];
@@ -259,36 +266,53 @@ void WaveformView::paint (juce::Graphics& g)
         const float x1 = juce::jmin ((float) wave.getRight(), sampleToX ((double) s.end));
         if (x1 <= x0)
             continue;
-        const auto c = theme::sliceColour (i);
-        g.setColour (c.withAlpha (i == selected ? 0.16f : 0.045f));
+        if (i == selected)
+            g.setColour (theme::accent.withAlpha (0.11f));
+        else
+            g.setColour (i % 2 == 1 ? juce::Colours::white.withAlpha (0.025f) : juce::Colours::transparentBlack);
         g.fillRect (x0, (float) wave.getY(), x1 - x0, (float) wave.getHeight());
     }
 
     drawGrid (g, wave, ruler);
 
-    // Waveform, coloured per chop
+    // Waveform. A chop set to play its own stem draws that stem.
     const float mid = (float) wave.getCentreY();
     const float halfH = (float) (wave.getHeight() - kLabelStrip - 6) * 0.5f;
     const float centre = mid + kLabelStrip * 0.5f;
     const double spp = viewLength / juce::jmax (1, wave.getWidth());
-    const auto& audio = d.sample->audio;
     int chop = juce::jmax (0, chopAt ((juce::int64) viewStart));
+    std::shared_ptr<const SampleData> source;
+    const Peaks* pk = nullptr;
+    int sourceChop = -1;
+
+    g.setColour (theme::edge);
+    g.drawHorizontalLine ((int) centre, (float) wave.getX(), (float) wave.getRight());
 
     for (int x = wave.getX(); x < wave.getRight(); ++x)
     {
         const double s0 = viewStart + (x - wave.getX()) * spp;
         const double s1 = s0 + spp;
-        float lo = 0.0f, hi = 0.0f;
-        if (spp >= kPeakBlock && ! peakMin.empty())
+        while (chop + 1 < (int) slices.size() && s0 >= (double) slices[(size_t) chop + 1].start)
+            ++chop;
+        if (chop != sourceChop)
         {
-            const int b0 = juce::jlimit (0, (int) peakMin.size() - 1, (int) (s0 / kPeakBlock));
-            const int b1 = juce::jlimit (b0, (int) peakMin.size() - 1, (int) (s1 / kPeakBlock));
-            lo = peakMin[(size_t) b0];
-            hi = peakMax[(size_t) b0];
+            sourceChop = chop;
+            source = chop < (int) slices.size() ? d.audioFor (slices[(size_t) chop]) : d.sample;
+            pk = &peaksOf (source);
+        }
+        const auto& audio = source->audio;
+
+        float lo = 0.0f, hi = 0.0f;
+        if (spp >= kPeakBlock && ! pk->lo.empty())
+        {
+            const int b0 = juce::jlimit (0, (int) pk->lo.size() - 1, (int) (s0 / kPeakBlock));
+            const int b1 = juce::jlimit (b0, (int) pk->lo.size() - 1, (int) (s1 / kPeakBlock));
+            lo = pk->lo[(size_t) b0];
+            hi = pk->hi[(size_t) b0];
             for (int b = b0 + 1; b <= b1; ++b)
             {
-                lo = juce::jmin (lo, peakMin[(size_t) b]);
-                hi = juce::jmax (hi, peakMax[(size_t) b]);
+                lo = juce::jmin (lo, pk->lo[(size_t) b]);
+                hi = juce::jmax (hi, pk->hi[(size_t) b]);
             }
         }
         else
@@ -304,17 +328,13 @@ void WaveformView::paint (juce::Graphics& g)
                 }
         }
 
-        while (chop + 1 < (int) slices.size() && s0 >= (double) slices[(size_t) chop + 1].start)
-            ++chop;
-        const auto colour = theme::sliceColour (chop).withAlpha (chop == selected ? 1.0f : 0.72f);
-        g.setColour (colour);
+        g.setColour (chop == selected ? theme::wave.brighter (0.35f) : theme::wave.withAlpha (0.85f));
         const float y0 = centre - juce::jlimit (-1.0f, 1.0f, hi) * halfH;
         const float y1 = centre - juce::jlimit (-1.0f, 1.0f, lo) * halfH;
         g.fillRect ((float) x, y0, 1.0f, juce::jmax (1.0f, y1 - y0));
     }
 
-    // Markers and chop tags
-    g.setFont (theme::font (11.5f, true));
+    // Markers and chop tabs
     for (int i = 0; i < (int) slices.size(); ++i)
     {
         const auto& s = slices[(size_t) i];
@@ -322,28 +342,26 @@ void WaveformView::paint (juce::Graphics& g)
         const float xEnd = sampleToX ((double) s.end);
         if (xEnd < (float) wave.getX() || x > (float) wave.getRight())
             continue;
-        const auto c = theme::sliceColour (i);
 
         if (i > 0)
         {
             const bool hot = i == hoverMarker || i == draggingMarker;
-            g.setColour (hot ? theme::text : c.withAlpha (0.9f));
+            g.setColour (hot ? theme::text : juce::Colour (0xff6d737b));
             g.fillRect (x - (hot ? 1.0f : 0.5f), (float) wave.getY(), hot ? 2.0f : 1.0f, (float) wave.getHeight());
-            juce::Path handle;
-            handle.addTriangle (x - 5.0f, (float) wave.getY(), x + 5.0f, (float) wave.getY(), x, (float) wave.getY() + 6.0f);
-            g.fillPath (handle);
         }
 
-        const float tagX = juce::jmax ((float) wave.getX(), x) + 3.0f;
-        const float room = xEnd - tagX - 3.0f;
+        const float tagX = juce::jmax ((float) wave.getX(), x) + 2.0f;
+        const float room = xEnd - tagX - 2.0f;
         if (room < (x < (float) wave.getX() ? 40.0f : 14.0f))
             continue;
-        const juce::String number (i + 1);
-        const float numW = juce::jmin (room, (float) number.length() * 7.0f + 8.0f);
-        const juce::Rectangle<float> tag (tagX, (float) wave.getY() + 3.0f, numW, 15.0f);
-        g.setColour (c.withAlpha (i == selected ? 1.0f : 0.85f));
-        g.fillRoundedRectangle (tag, 3.0f);
-        g.setColour (juce::Colours::black.withAlpha (0.85f));
+        const int stem = d.stemFor (s);
+        const juce::String number = juce::String (i + 1) + (stem >= 0 ? " " + stemName (stem).substring (0, 3).toLowerCase() : juce::String());
+        g.setFont (theme::mono (11.0f));
+        const float numW = juce::jmin (room, (float) juce::GlyphArrangement::getStringWidthInt (g.getCurrentFont(), number) + 8.0f);
+        const juce::Rectangle<float> tag (tagX, (float) wave.getY() + 2.0f, numW, 15.0f);
+        g.setColour (i == selected ? theme::accent : theme::panelRaised);
+        g.fillRect (tag);
+        g.setColour (i == selected ? juce::Colours::black : theme::textDim);
         g.drawText (number, tag, juce::Justification::centred, false);
 
         const auto& label = s.settings.label;
@@ -351,9 +369,8 @@ void WaveformView::paint (juce::Graphics& g)
         {
             g.setColour (theme::text);
             g.setFont (theme::font (12.0f));
-            g.drawText (label, juce::Rectangle<float> (tag.getRight() + 4.0f, tag.getY(), room - numW - 4.0f, 15.0f),
+            g.drawText (label, juce::Rectangle<float> (tag.getRight() + 5.0f, tag.getY(), room - numW - 5.0f, 15.0f),
                         juce::Justification::centredLeft, true);
-            g.setFont (theme::font (11.5f, true));
         }
     }
 
@@ -373,10 +390,12 @@ void WaveformView::paint (juce::Graphics& g)
             if (x + width < (float) wave.getX() || x < lastRight + 3.0f)
                 continue;
             const juce::Rectangle<float> box (x, y, width, 16.0f);
-            g.setColour (theme::background.withAlpha (0.75f));
-            g.fillRoundedRectangle (box, 3.0f);
+            g.setColour (theme::inset.withAlpha (0.8f));
+            g.fillRect (box);
+            g.setColour (theme::warn.withAlpha (0.6f));
+            g.fillRect (box.getX(), box.getY(), 1.0f, box.getHeight());
             g.setColour (theme::text.withAlpha (0.9f));
-            g.drawText (w.text, box, juce::Justification::centred, false);
+            g.drawText (w.text, box.withTrimmedLeft (2.0f), juce::Justification::centred, false);
             lastRight = box.getRight();
         }
     }
@@ -390,8 +409,9 @@ void WaveformView::paint (juce::Graphics& g)
             g.fillRect (x - 0.5f, (float) wave.getY(), 1.5f, (float) wave.getHeight());
     }
 
-    g.setColour (theme::outline);
+    g.setColour (theme::edge);
     g.drawHorizontalLine (ruler.getBottom(), 0.0f, (float) getWidth());
+    g.drawRect (getLocalBounds());
 }
 
 //==============================================================================

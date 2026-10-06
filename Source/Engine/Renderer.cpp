@@ -193,14 +193,14 @@ juce::uint64 hashKey (const void* sample, juce::int64 start, juce::int64 end, co
 }
 } // namespace
 
-std::shared_ptr<const juce::AudioBuffer<float>> RenderThread::renderCached (const RenderRequest& r, juce::int64 start, juce::int64 end,
-                                                                            const Processing& p,
+std::shared_ptr<const juce::AudioBuffer<float>> RenderThread::renderCached (const std::shared_ptr<const SampleData>& sample, double targetRate,
+                                                                            juce::int64 start, juce::int64 end, const Processing& p,
                                                                             std::map<juce::uint64, std::shared_ptr<const juce::AudioBuffer<float>>>& used)
 {
-    const auto key = hashKey (r.sample.get(), start, end, p, r.targetRate);
+    const auto key = hashKey (sample.get(), start, end, p, targetRate);
     auto it = cache.find (key);
     if (it == cache.end())
-        it = cache.emplace (key, std::make_shared<const juce::AudioBuffer<float>> (renderSegment (*r.sample, start, end, p, r.targetRate))).first;
+        it = cache.emplace (key, std::make_shared<const juce::AudioBuffer<float>> (renderSegment (*sample, start, end, p, targetRate))).first;
     used[key] = it->second;
     return it->second;
 }
@@ -243,16 +243,18 @@ bool RenderThread::renderPass (const RenderRequest& r)
                 return false; // keep what we rendered in the cache and start on the newer request
 
             const auto p = combine (r.global, &s.settings, r.hostTempoRatio);
+            const bool ownStem = r.stems != nullptr && s.settings.stem >= 0 && s.settings.stem < kNumStems;
+            const auto& source = ownStem ? r.stems->stems[(size_t) s.settings.stem] : r.sample;
             RenderedSlice rs;
-            if (playsUnprocessed (p, *r.sample, r.targetRate))
+            if (playsUnprocessed (p, *source, r.targetRate))
             {
-                rs.audio = sourceView (r.sample);
+                rs.audio = sourceView (source);
                 rs.offset = (int) s.start;
                 rs.length = (int) (s.end - s.start);
             }
             else
             {
-                rs.audio = renderCached (r, s.start, s.end, p, used);
+                rs.audio = renderCached (source, r.targetRate, s.start, s.end, p, used);
                 rs.length = rs.audio->getNumSamples();
             }
             rs.sourceStart = s.start;
@@ -282,7 +284,7 @@ bool RenderThread::renderPass (const RenderRequest& r)
                 PlaybackData::Ptr early = new PlaybackData (*data);
                 publish (early);
             }
-            data->full.audio = renderCached (r, 0, length, p, used);
+            data->full.audio = renderCached (r.sample, r.targetRate, 0, length, p, used);
         }
         data->full.length = data->full.audio->getNumSamples();
     }
