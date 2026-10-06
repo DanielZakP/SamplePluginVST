@@ -97,7 +97,7 @@ private:
 
     juce::TextButton playButton { "Play" }, stopButton { "Stop" }, fillButton { "Start from sample order" }, clearButton { "Clear" };
     juce::ComboBox lengthBox, snapBox;
-    DragOutButton dragMidi;
+    DragOutButton dragMidi, dragAudio;
     juce::ScrollBar hScroll { false }, vScroll { true };
 
     juce::Rectangle<int> toolbar, headerArea, rulerArea, gridArea, velocityArea, lengthCaption, snapCaption;

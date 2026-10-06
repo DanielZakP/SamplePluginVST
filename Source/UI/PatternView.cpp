@@ -43,7 +43,8 @@ constexpr int kScroll = 10;
 
 PatternView::PatternView (ChopLabProcessor& p)
     : proc (p),
-      dragMidi ("Drag MIDI to FL", [this] { return proc.writePatternMidi (proc.getDragFolder()); })
+      dragMidi ("Drag MIDI to FL", [this] { return proc.writePatternMidi (proc.getDragFolder()); }),
+      dragAudio ("Drag audio", [this] { return proc.writePatternAudio (proc.getDragFolder()); })
 {
     setWantsKeyboardFocus (true);
 
@@ -61,6 +62,13 @@ PatternView::PatternView (ChopLabProcessor& p)
     dragMidi.onClick = [this]
     {
         if (auto f = proc.writePatternMidi (proc.getDragFolder()); f.existsAsFile())
+            f.revealToUser();
+    };
+    dragAudio.setTooltip ("Drag the pattern into FL's playlist as audio, exactly as it plays here (start offsets, stems, velocities). "
+                          "One loop at the project tempo that loops seamlessly. Click to save it and show the file");
+    dragAudio.onClick = [this]
+    {
+        if (auto f = proc.writePatternAudio (proc.getDragFolder()); f.existsAsFile())
             f.revealToUser();
     };
 
@@ -92,7 +100,7 @@ PatternView::PatternView (ChopLabProcessor& p)
     };
 
     for (auto* c : std::initializer_list<juce::Component*> { &playButton, &stopButton, &fillButton, &clearButton, &lengthBox, &snapBox, &dragMidi,
-                                                             &hScroll, &vScroll })
+                                                             &dragAudio, &hScroll, &vScroll })
         addAndMakeVisible (c);
     hScroll.addListener (this);
     vScroll.addListener (this);
@@ -155,11 +163,13 @@ void PatternView::documentChanged()
     for (auto* c : std::initializer_list<juce::Component*> { &playButton, &stopButton, &fillButton, &clearButton, &lengthBox, &snapBox })
         c->setEnabled (has);
     dragMidi.setEnabled (has && ! working.notes.empty());
+    dragAudio.setEnabled (has && ! working.notes.empty());
     bool anyOffset = false;
     for (const auto& n : working.notes)
         anyOffset = anyOffset || n.offset > 0.0;
     dragMidi.setTooltip (juce::String ("Drag into FL's piano roll or playlist. The notes play the same chops on this channel.")
-                         + (anyOffset ? " Start offsets stay behind: MIDI has no way to carry them, so in FL those notes start at the top of the chop." : ""));
+                         + (anyOffset ? " Start offsets stay behind: MIDI has no way to carry them, so in FL those notes start at the top of the chop. "
+                                       "Use Drag audio to keep them." : ""));
     playButton.setToggleState (proc.isPatternPlaying(), juce::dontSendNotification);
     updateScrollbars();
     repaint();
@@ -184,7 +194,9 @@ void PatternView::resized()
         fillButton.setBounds (t.removeFromLeft (172));
         t.removeFromLeft (4);
         clearButton.setBounds (t.removeFromLeft (56));
-        dragMidi.setBounds (t.removeFromRight (150));
+        dragMidi.setBounds (t.removeFromRight (140));
+        t.removeFromRight (6);
+        dragAudio.setBounds (t.removeFromRight (112));
     }
 
     r.removeFromTop (8);

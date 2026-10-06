@@ -222,6 +222,45 @@ int main (int argc, char** argv)
             loudest = juce::jmax (loudest, std::abs (src.getSample (0, from + i)));
         }
         check (loudest > 0.01f && worst < 1.0e-4f, "plays the chop from 0.1 s in (largest difference " + juce::String (worst, 6) + ")");
+
+        // Bounced to audio it's the same, one loop long
+        double bounceRate = 0.0;
+        const auto bounce = proc->renderPatternAudio (bounceRate);
+        float bounceWorst = 0.0f;
+        for (int i = (int) (0.003 * kRate); i < juce::jmin ((int) (0.25 * kRate), chopEnd - from - (int) (0.004 * kRate)); ++i)
+            bounceWorst = juce::jmax (bounceWorst, std::abs (bounce.getSample (0, i) - src.getSample (0, from + i)));
+        check (bounce.getNumSamples() == (int) (2.0 * kRate) && std::abs (bounceRate - kRate) < 0.5, "bounce is one loop: 4 beats at 120 BPM");
+        check (bounceWorst < 1.0e-4f, "bounce keeps the start offset (largest difference " + juce::String (bounceWorst, 6) + ")");
+
+        // A one-shot near the end rings on into the start, as it does when the pattern loops
+        auto oneShot = proc->doc().global;
+        oneShot.oneShot = true;
+        proc->setGlobalSettings (oneShot);
+        Pattern wrap;
+        wrap.lengthBeats = 4.0;
+        wrap.notes = { { 0, 3.75, 0.25, 1.0f, 0.0 } };
+        proc->setPattern (wrap);
+        const auto wrapped = proc->renderPatternAudio (bounceRate);
+        const int into = (int) (2.0 * kRate) - (int) (3.75 * 0.5 * kRate); // how far into the chop it is when the loop restarts
+        float wrapWorst = 0.0f, wrapLoudest = 0.0f;
+        for (int i = 0; i < (int) (0.08 * kRate); ++i)
+        {
+            const float expected = src.getSample (0, (int) proc->doc().slices[0].start + into + i);
+            wrapWorst = juce::jmax (wrapWorst, std::abs (wrapped.getSample (0, i) - expected));
+            wrapLoudest = juce::jmax (wrapLoudest, std::abs (expected));
+        }
+        check (wrapLoudest > 0.001f && wrapWorst < 1.0e-4f, "what rings past the end is heard at the start (largest difference "
+                                                                 + juce::String (wrapWorst, 6) + ")");
+        oneShot.oneShot = false;
+        proc->setGlobalSettings (oneShot);
+
+        const auto file = proc->writePatternAudio (juce::File::getSpecialLocation (juce::File::tempDirectory));
+        juce::WavAudioFormat wav;
+        std::unique_ptr<juce::AudioFormatReader> reader (file.existsAsFile() ? wav.createReaderFor (new juce::FileInputStream (file), true) : nullptr);
+        check (reader != nullptr && reader->lengthInSamples == (juce::int64) (2.0 * kRate) && file.getFileName().contains ("120 BPM"),
+               "Drag audio writes it as a WAV: " + file.getFileName());
+        reader = nullptr;
+        file.deleteFile();
     }
     proc->setPattern (p);
 

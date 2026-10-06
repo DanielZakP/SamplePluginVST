@@ -4,6 +4,7 @@
 #include "Engine/Model.h"
 #include "Engine/Pattern.h"
 #include "Engine/Renderer.h"
+#include "Engine/Voices.h"
 #include "Lyrics/Lyrics.h"
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_audio_formats/juce_audio_formats.h>
@@ -133,6 +134,11 @@ public:
     bool isPatternPlaying() const { return patternPlaying.load(); }
     double getPatternPosition() const { return patternPosition.load(); }
     juce::File writePatternMidi (const juce::File& folder) const;
+    // The pattern as audio, exactly as it plays here: start offsets, stems, velocities and all.
+    // One loop at the project tempo, as it sounds once it's looping (anything ringing past the
+    // end is heard at the start), so the file loops seamlessly.
+    juce::AudioBuffer<float> renderPatternAudio (double& sampleRate);
+    juce::File writePatternAudio (const juce::File& folder);
     int currentPage = 0; // editor page: 0 = chops, 1 = pattern
 
     double getHostBpm() const { return hostBpm.load(); }
@@ -246,23 +252,6 @@ private:
 
     //==============================================================================
     // Audio thread
-    struct Voice
-    {
-        choplab::PlaybackData::Ptr data;
-        const choplab::RenderedSlice* slice = nullptr;
-        int sliceIndex = -1;
-        int note = -1;
-        bool preview = false;
-        bool oneShot = false;
-        double pos = 0.0, inc = 1.0;
-        float gain = 1.0f, env = 0.0f, attackStep = 1.0f, releaseStep = 0.0f;
-        bool releasing = false;
-        bool active = false;
-        bool fromPattern = false;
-        double startPos = 0.0; // where it started in the chop (later than 0 for notes with an offset)
-        juce::uint32 age = 0;
-    };
-
     // What the built-in pattern plays in one block, in time order.
     struct PatternEvent
     {
@@ -278,11 +267,10 @@ private:
     void addPatternEvents (int numSamples);
     void handlePatternEvent (const PatternEvent&);
     void publishPattern();
-    void releaseVoice (Voice&, bool fast);
+    void releaseVoice (choplab::Voice&, bool fast);
     void renderVoices (juce::AudioBuffer<float>&, int start, int num);
 
-    std::array<Voice, 32> voices;
-    juce::uint32 voiceCounter = 0;
+    choplab::VoiceBank bank;
     choplab::PlaybackData::Ptr audioData;
     double currentRate = 44100.0;
 

@@ -201,12 +201,7 @@ void ChopLabProcessor::prepareToPlay (double sampleRate, int)
 {
     currentRate = sampleRate;
     preparedRate = sampleRate;
-    for (auto& v : voices)
-    {
-        v.active = false;
-        v.data = nullptr;
-        v.slice = nullptr;
-    }
+    bank.reset();
 }
 
 bool ChopLabProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
@@ -240,7 +235,7 @@ void ChopLabProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
             const int request = r.index;
             if (request == kPreviewStop)
             {
-                for (auto& v : voices)
+                for (auto& v : bank.voices)
                     if (v.active && v.preview)
                         releaseVoice (v, true);
             }
@@ -293,7 +288,7 @@ void ChopLabProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     renderUpTo (numSamples);
 
     size_t reported = 0;
-    for (const auto& v : voices)
+    for (const auto& v : bank.voices)
     {
         if (reported >= playPositions.size())
             break;
@@ -314,7 +309,7 @@ void ChopLabProcessor::addPatternEvents (int numSamples)
     if (playing && ! patternWasPlaying)
         patternBeat = 0.0;
     if (! playing && patternWasPlaying)
-        for (auto& v : voices)
+        for (auto& v : bank.voices)
             if (v.active && v.fromPattern)
                 releaseVoice (v, true);
     patternWasPlaying = playing;
@@ -347,7 +342,7 @@ void ChopLabProcessor::handlePatternEvent (const PatternEvent& e)
         startVoice (e.chop, -1, e.velocity, false, true, e.offset);
         return;
     }
-    for (auto& v : voices)
+    for (auto& v : bank.voices)
         if (v.active && v.fromPattern && ! v.oneShot && ! v.releasing && v.sliceIndex == e.chop)
             releaseVoice (v, false);
 }
@@ -365,13 +360,13 @@ void ChopLabProcessor::handleMidi (const juce::MidiMessage& m)
     }
     else if (m.isNoteOff())
     {
-        for (auto& v : voices)
+        for (auto& v : bank.voices)
             if (v.active && ! v.preview && ! v.oneShot && ! v.releasing && ! v.fromPattern && v.note == m.getNoteNumber())
                 releaseVoice (v, false);
     }
     else if (m.isAllNotesOff() || m.isAllSoundOff())
     {
-        for (auto& v : voices)
+        for (auto& v : bank.voices)
             if (v.active)
                 releaseVoice (v, true);
     }
@@ -379,127 +374,17 @@ void ChopLabProcessor::handleMidi (const juce::MidiMessage& m)
 
 void ChopLabProcessor::startVoice (int sliceIndex, int note, float velocity, bool preview, bool fromPattern, double startSeconds)
 {
-    if (audioData == nullptr)
-        return;
-
-    const RenderedSlice* rs = nullptr;
-    if (sliceIndex < 0)
-        rs = &audioData->full;
-    else if (sliceIndex < (int) audioData->slices.size())
-        rs = &audioData->slices[(size_t) sliceIndex];
-    if (rs == nullptr || rs->audio == nullptr || rs->length < 2)
-        return;
-
-    // Chops cut themselves off when retriggered; mono mode cuts everything.
-    for (auto& v : voices)
-        if (v.active && (audioData->mono || (preview && v.preview) || (! preview && ! v.preview && v.sliceIndex == sliceIndex)))
-            releaseVoice (v, true);
-
-    Voice* target = nullptr;
-    for (auto& v : voices)
-        if (! v.active)
-        {
-            target = &v;
-            break;
-        }
-    if (target == nullptr)
-        target = &*std::min_element (voices.begin(), voices.end(), [] (const Voice& a, const Voice& b) { return a.age < b.age; });
-
-    auto& v = *target;
-    v.data = audioData;
-    v.slice = rs;
-    v.sliceIndex = sliceIndex;
-    v.note = note;
-    v.preview = preview;
-    v.fromPattern = fromPattern;
-    v.oneShot = preview || audioData->oneShot;
-    v.pos = juce::jlimit (0.0, (double) juce::jmax (0, rs->length - 2), startSeconds * audioData->sampleRate);
-    v.startPos = v.pos;
-    v.inc = audioData->sampleRate / currentRate;
-    v.gain = rs->gain * audioData->masterGain * (preview ? 1.0f : velocity);
-    const float attack = rs->attackMs * 0.001f * (float) currentRate;
-    v.env = attack > 1.0f ? 0.0f : 1.0f;
-    v.attackStep = attack > 1.0f ? 1.0f / attack : 1.0f;
-    v.releaseStep = 1.0f / juce::jmax (1.0f, rs->releaseMs * 0.001f * (float) currentRate);
-    v.releasing = false;
-    v.active = true;
-    v.age = ++voiceCounter;
+    bank.start (audioData, sliceIndex, note, velocity, preview, fromPattern, startSeconds, currentRate);
 }
 
 void ChopLabProcessor::releaseVoice (Voice& v, bool fast)
 {
-    v.releasing = true;
-    if (fast)
-        v.releaseStep = juce::jmax (v.releaseStep, 1.0f / (0.004f * (float) currentRate));
+    VoiceBank::release (v, fast, currentRate);
 }
 
 void ChopLabProcessor::renderVoices (juce::AudioBuffer<float>& buffer, int start, int num)
 {
-    auto* left = buffer.getWritePointer (0);
-    auto* right = buffer.getNumChannels() > 1 ? buffer.getWritePointer (1) : nullptr;
-
-    for (auto& v : voices)
-    {
-        if (! v.active)
-            continue;
-
-        const auto& audio = *v.slice->audio;
-        const int len = v.slice->length;
-        const float* s0 = audio.getReadPointer (0) + v.slice->offset;
-        const float* s1 = audio.getNumChannels() > 1 ? audio.getReadPointer (1) + v.slice->offset : s0;
-        // Short fades at the chop edges so cutting mid-waveform never clicks (a little longer when a
-        // note starts partway into the chop, which is usually mid-waveform)
-        const double fadeIn = (v.startPos > 0.0 ? 0.002 : 0.0003) * currentRate / v.inc, fadeOut = 0.003 * currentRate / v.inc;
-        bool finished = false;
-
-        for (int i = start; i < start + num; ++i)
-        {
-            const int idx = (int) v.pos;
-            if (idx >= len - 1)
-            {
-                finished = true;
-                break;
-            }
-
-            if (v.releasing)
-            {
-                v.env -= v.releaseStep;
-                if (v.env <= 0.0f)
-                {
-                    finished = true;
-                    break;
-                }
-            }
-            else if (v.env < 1.0f)
-            {
-                v.env = juce::jmin (1.0f, v.env + v.attackStep);
-            }
-
-            const float frac = (float) (v.pos - idx);
-            const float l = s0[idx] + frac * (s0[idx + 1] - s0[idx]);
-            const float r = s1[idx] + frac * (s1[idx + 1] - s1[idx]);
-            const double remaining = (double) (len - 1) - v.pos;
-            const float edge = (float) juce::jmin (1.0, (v.pos - v.startPos) / fadeIn, remaining / fadeOut);
-            const float g = v.gain * v.env * juce::jmax (0.0f, edge);
-            if (right != nullptr)
-            {
-                left[i] += l * g;
-                right[i] += r * g;
-            }
-            else
-            {
-                left[i] += 0.5f * (l + r) * g;
-            }
-            v.pos += v.inc;
-        }
-
-        if (finished)
-        {
-            v.active = false;
-            v.slice = nullptr;
-            v.data = nullptr;
-        }
-    }
+    bank.render (buffer, start, num, currentRate);
 }
 
 //==============================================================================
@@ -1443,6 +1328,96 @@ void ChopLabProcessor::publishPattern()
         const juce::ScopedLock sl (retiredLock);
         retiredPatterns.add (old);
     }
+}
+
+juce::AudioBuffer<float> ChopLabProcessor::renderPatternAudio (double& sampleRate)
+{
+    // The chops may still be rendering after an edit; the bounce should have the latest.
+    for (int waited = 0; renderThread.isBusy() && waited < 15000; waited += 10)
+        juce::Thread::sleep (10);
+    PlaybackData::Ptr data;
+    {
+        const juce::SpinLock::ScopedLockType sl (publishLock);
+        data = published;
+    }
+    const auto& pattern = document.pattern;
+    if (data == nullptr || data->slices.empty() || pattern.notes.empty() || pattern.lengthBeats <= 0.0)
+        return {};
+
+    const double rate = data->sampleRate;
+    sampleRate = rate;
+    const double samplesPerBeat = 60.0 / juce::jmax (1.0, hostBpm.load()) * rate;
+    const int loop = juce::jmax (1, (int) std::llround (pattern.lengthBeats * samplesPerBeat));
+
+    // Play it enough times over that sounds from earlier loops have died away, then keep the last
+    // loop: that's what you hear once the pattern is going round.
+    int longest = 0;
+    for (const auto& rs : data->slices)
+        longest = juce::jmax (longest, rs.length + (int) (rs.releaseMs * 0.001f * (float) rate));
+    const int loops = 1 + juce::jlimit (1, 16, 1 + longest / loop);
+
+    struct Event
+    {
+        int at, chop;
+        float velocity;
+        double offset;
+        bool on;
+    };
+    std::vector<Event> events;
+    const int numChops = (int) data->slices.size();
+    for (int k = 0; k < loops; ++k)
+        for (const auto& n : pattern.notes)
+        {
+            if (n.chop < 0 || n.chop >= numChops || n.start >= pattern.lengthBeats)
+                continue;
+            const int base = k * loop;
+            events.push_back ({ base + (int) (n.start * samplesPerBeat), n.chop, n.velocity, n.offset, true });
+            events.push_back ({ base + juce::jmin (loop, (int) (juce::jmin (n.end(), pattern.lengthBeats) * samplesPerBeat)), n.chop, 0.0f, 0.0, false });
+        }
+    // Note-offs before note-ons at the same moment, as when it plays live.
+    std::stable_sort (events.begin(), events.end(), [] (const Event& a, const Event& b) { return a.at < b.at || (a.at == b.at && ! a.on && b.on); });
+
+    VoiceBank player;
+    juce::AudioBuffer<float> all (2, loop * loops);
+    all.clear();
+    int pos = 0;
+    for (const auto& e : events)
+    {
+        if (e.at > pos)
+        {
+            player.render (all, pos, e.at - pos, rate);
+            pos = e.at;
+        }
+        if (e.on)
+            player.start (data, e.chop, -1, e.velocity, false, true, e.offset, rate);
+        else
+            for (auto& v : player.voices)
+                if (v.active && v.fromPattern && ! v.oneShot && ! v.releasing && v.sliceIndex == e.chop)
+                    VoiceBank::release (v, false, rate);
+    }
+    if (pos < all.getNumSamples())
+        player.render (all, pos, all.getNumSamples() - pos, rate);
+
+    juce::AudioBuffer<float> out (2, loop);
+    for (int c = 0; c < 2; ++c)
+        out.copyFrom (c, 0, all, c, (loops - 1) * loop, loop);
+    return out;
+}
+
+juce::File ChopLabProcessor::writePatternAudio (const juce::File& folder)
+{
+    double rate = 0.0;
+    const auto audio = renderPatternAudio (rate);
+    if (audio.getNumSamples() == 0)
+        return {};
+    // Named after what's in it, so an earlier bounce FL still has open is never overwritten.
+    const double bpm = hostBpm.load();
+    const auto tempo = std::abs (bpm - std::round (bpm)) < 0.005 ? juce::String ((int) std::round (bpm)) : juce::String (bpm, 2);
+    const auto id = juce::String::toHexString (audioHash (audio)).getLastCharacters (6);
+    const auto file = folder.getChildFile (legalName (document.mix()->name) + " - pattern " + tempo + " BPM " + id + ".wav");
+    if (file.existsAsFile())
+        return file;
+    return writeWav (audio, rate, file, 32) ? file : juce::File();
 }
 
 juce::File ChopLabProcessor::writePatternMidi (const juce::File& folder) const

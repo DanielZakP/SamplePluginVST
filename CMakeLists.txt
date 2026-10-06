@@ -108,6 +108,7 @@ set(CHOPLAB_CORE_SOURCES
     Source/Analysis/Analysis.cpp
     Source/Engine/Chopper.cpp
     Source/Engine/Renderer.cpp
+    Source/Engine/Voices.cpp
     Source/Engine/Pattern.cpp
     Source/Lyrics/Lyrics.cpp
     Source/Common/Download.cpp
